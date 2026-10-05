@@ -23,7 +23,7 @@ export const RAM_DAMAGE = 50;
 export const HIT_INVULN = 1;
 export const RESPAWN_INVULN = 2.5;
 export const RESPAWN_DELAY = 2.2;
-export const WAVE_CLEAR_REFILL = 34;
+export const WAVE_CLEAR_REFILL = 25;
 
 export const START_LIVES = 3;
 export const MAX_LIVES = 6;
@@ -62,5 +62,5 @@ export const CARD_GAP = 8;
 export const cardX = (i: number) => (VIEW_W - (3 * CARD_W + 2 * CARD_GAP)) / 2 + i * (CARD_W + CARD_GAP);
 
 /** Energy cells dropped by destroyed enemies. */
-export const DROP_ENERGY = 20;
+export const DROP_ENERGY = 15;
 export const DROP_SPEED = 38;

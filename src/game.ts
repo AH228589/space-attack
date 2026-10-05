@@ -40,6 +40,7 @@ import {
   ANOMALIES,
   SCORES,
   applyAnomaly,
+  bossFor,
   rollAnomaly,
   waveConfig,
   waveTagline,
@@ -73,7 +74,12 @@ export type GameEvent =
   | "gameOver"
   | "submit"
   | "beat"
-  | "pause";
+  | "pause"
+  | "split"
+  | "bossWarning"
+  | "bossHit"
+  | "bossPhase"
+  | "bossDie";
 
 /** What the player is doing this step. `*Pressed`, `typed` and `tap` only last for the step a press happened. */
 export interface Controls {
@@ -162,6 +168,12 @@ export interface Enemy {
   nextShotY: number;
   flash: number;
   dead: boolean;
+  /** Gunners: seconds to their next spread shot from the formation. */
+  fireT: number;
+  /** Mites never return to the formation; they are gone once they leave the screen. */
+  noReturn: boolean;
+  /** Dive speed relative to the wave (tanks are slow, mites fast). */
+  speedMul: number;
 }
 
 export interface Bullet {
@@ -175,6 +187,37 @@ export interface Bullet {
   /** Player shots: enemies this shot can still pass through, and the last one it hit. */
   pierce: number;
   lastHit: number;
+  /**
+   * Enemy shots: "bolt" is the classic dash; "orb" is a slow round bullet-hell shot that only
+   * hurts the ship's small core, so dense patterns can be weaved through.
+   */
+  style?: "bolt" | "orb";
+  color?: string;
+}
+
+export interface Boss {
+  name: string;
+  tier: number;
+  x: number;
+  y: number;
+  hw: number;
+  hh: number;
+  hp: number;
+  maxHp: number;
+  /** Seconds alive; drives movement and patterns. */
+  t: number;
+  phase: 1 | 2 | 3;
+  /** Seconds left of the short breather after a phase change. */
+  calm: number;
+  flash: number;
+  /** Pattern timers and the rotating angle of the spirals. */
+  shotT: number;
+  altT: number;
+  minionT: number;
+  spin: number;
+  pattern: number;
+  /** Seconds since it was destroyed (it breaks apart for a moment), or -1 while it fights. */
+  dying: number;
 }
 
 export interface Drop {
@@ -227,6 +270,8 @@ export interface Banner {
   /** Optional third line, e.g. what a wave anomaly does. */
   sub2?: string;
   subColor?: string;
+  color?: string;
+  blink?: boolean;
   t: number;
   max: number;
 }
@@ -241,7 +286,16 @@ export const ENEMY_COLORS: Record<EnemyKind, string> = {
   drone: "#3ee05a",
   hornet: "#ff3b3b",
   flagship: "#ffd23a",
+  gunner: "#b45cff",
+  splitter: "#ff8a1f",
+  tank: "#5aa0ff",
+  mite: "#ffb347",
 };
+
+/** Kinds that sit two columns apart in the formation. */
+const WIDE_KINDS = new Set<EnemyKind>(["flagship", "gunner"]);
+/** Orb colours for the boss's patterns. */
+const ORB = { pink: "#ff4fd8", cyan: "#2ee6e6", yellow: "#ffd23a", violet: "#b45cff", red: "#ff3b3b" };
 
 const STAR_COLORS = ["#ffd23a", "#ffd23a", "#ffd23a", "#e8ecff", "#7fa8ff", "#ff8a8a"];
 
@@ -286,8 +340,12 @@ export class Game {
 
   /** Upgrade levels picked this run. */
   perks: PerkLevels = {};
-  /** The three cards on offer between waves, and which one is highlighted. */
-  draft: { cards: CardId[]; sel: number } | null = null;
+  /** The three cards on offer between waves, which one is highlighted, and whether it is a boss reward. */
+  draft: { cards: CardId[]; sel: number; bonus: boolean } | null = null;
+  /** The boss on every 10th wave. */
+  boss: Boss | null = null;
+  /** Name of the last boss beaten, for the reward draft's header. */
+  bossBeaten = "";
   /** The SHIELD upgrade's bubble, recharged every wave. */
   shieldUp = false;
 
@@ -390,7 +448,8 @@ export class Game {
     }
   }
 
-  startGame(): void {
+  /** `startWave` lets tests (and curious developers) jump straight to a later wave. */
+  startGame(startWave = 1): void {
     this.score = 0;
     this.newHi = false;
     this.lives = START_LIVES;
@@ -410,8 +469,10 @@ export class Game {
     this.popups = [];
     this.respawnT = -1;
     this.shake = 0;
-    this.hintT = 7;
-    this.wave = 0;
+    this.hintT = startWave === 1 ? 7 : 0;
+    this.boss = null;
+    this.bossBeaten = "";
+    this.wave = startWave - 1;
     this.setPhase("playing");
     this.nextWave();
   }
@@ -423,6 +484,7 @@ export class Game {
   }
 
   toTitle(): void {
+    this.boss = null;
     this.enemies = [];
     this.bullets = [];
     this.enemyBullets = [];
@@ -456,6 +518,15 @@ export class Game {
     this.diveT = WAVE_GRACE;
     this.formFireT = WAVE_GRACE + this.cfg.formationFireInterval;
     this.shieldUp = this.level("shield") > 0;
+    this.boss = null;
+    if (this.cfg.boss) {
+      this.enemies = [];
+      this.spawnBoss();
+      this.waveTotal = 1;
+      this.emit("waveStart");
+      this.emit("bossWarning");
+      return;
+    }
     this.spawnFormation();
     this.waveTotal = this.enemies.length;
     const a = this.anomaly ? ANOMALIES[this.anomaly] : null;
@@ -514,11 +585,12 @@ export class Game {
   }
 
   get maxEnergy(): number {
-    return MAX_ENERGY + 25 * this.level("plating");
+    return MAX_ENERGY + 20 * this.level("plating");
   }
 
   private openDraft(): void {
-    this.draft = { cards: dealCards(this.perks, this.rng), sel: 1 };
+    const bonus = this.bossBeaten !== "";
+    this.draft = { cards: dealCards(this.perks, this.rng, 3, bonus), sel: 1, bonus };
     this.banner = null;
     this.setPhase("draft");
     this.emit("draft");
@@ -555,10 +627,11 @@ export class Game {
       p.energy = this.maxEnergy;
     } else {
       this.perks[card] = this.level(card) + 1;
-      if (card === "plating" && p.alive) p.energy = Math.min(this.maxEnergy, p.energy + 25);
+      if (card === "plating" && p.alive) p.energy = Math.min(this.maxEnergy, p.energy + 20);
       if (card === "extra") this.lives = Math.min(MAX_LIVES, this.lives + 1);
     }
     this.draft = null;
+    this.bossBeaten = "";
     this.emit("confirm");
     this.setPhase("playing");
     this.nextWave();
@@ -648,6 +721,7 @@ export class Game {
 
     this.updatePlayer(dt, c);
     this.updateEnemies(dt);
+    this.updateBoss(dt);
     this.updateBullets(dt);
     this.updateDrops(dt);
     this.collide();
@@ -661,9 +735,11 @@ export class Game {
 
     if (this.phase !== "playing") return;
 
-    if (this.enemies.length === 0 && this.clearT < 0) {
-      this.clearT = 1.6;
-      this.banner = { text: `WAVE ${this.wave} CLEAR`, sub: "ENERGY RECHARGED", t: 0, max: 1.6 };
+    if (this.enemies.length === 0 && !this.boss && this.clearT < 0) {
+      this.clearT = this.cfg.boss ? 2.2 : 1.6;
+      this.banner = this.cfg.boss
+        ? { text: `${this.bossBeaten || "BOSS"} DOWN`, sub: "ENERGY RECHARGED", t: 0, max: 2.2, color: "#ffd23a" }
+        : { text: `WAVE ${this.wave} CLEAR`, sub: "ENERGY RECHARGED", t: 0, max: 1.6 };
       if (this.player.alive) this.player.energy = Math.min(this.maxEnergy, this.player.energy + WAVE_CLEAR_REFILL);
       this.emit("waveClear");
     }
@@ -702,7 +778,7 @@ export class Game {
     if (!p.alive) return;
     p.invuln = Math.max(0, p.invuln - dt);
     p.cooldown = Math.max(0, p.cooldown - dt);
-    p.energy = Math.min(this.maxEnergy, p.energy + 2 * this.level("repair") * dt);
+    p.energy = Math.min(this.maxEnergy, p.energy + this.level("repair") * dt);
 
     const speed = PLAYER_SPEED * (1 + 0.2 * this.level("thrusters"));
     const dir = (c.right ? 1 : 0) - (c.left ? 1 : 0);
@@ -729,7 +805,7 @@ export class Game {
         shot(p.x - 3, -38);
         shot(p.x + 3, 38);
       }
-      p.cooldown = FIRE_COOLDOWN * Math.pow(0.8, this.level("rapid"));
+      p.cooldown = FIRE_COOLDOWN * Math.pow(0.85, this.level("rapid"));
       this.stats.shots += volley;
       this.emit("shoot");
     }
@@ -755,8 +831,10 @@ export class Game {
     this.cfg.rows.forEach((r, row) => {
       for (let c = 0; c < r.count; c++) {
         const centre = c - (r.count - 1) / 2;
-        const gx = r.kind === "flagship" ? centre * 2 : centre;
+        const gx = WIDE_KINDS.has(r.kind) ? centre * 2 : centre;
         const side = centre < 0 ? -1 : 1;
+        const baseHp =
+          r.kind === "flagship" ? this.cfg.flagshipHp : r.kind === "hornet" ? this.cfg.hornetHp : r.kind === "tank" ? this.cfg.tankHp : 1;
         this.enemies.push({
           id: this.nextId++,
           kind: r.kind,
@@ -766,7 +844,7 @@ export class Game {
           y: 70 + row * 8,
           hw: 5.5,
           hh: r.kind === "flagship" ? 4.5 : 4,
-          hp: r.kind === "flagship" ? this.cfg.flagshipHp : r.kind === "hornet" ? this.cfg.hornetHp : 1,
+          hp: baseHp + this.cfg.armor,
           state: "entering",
           t: 0,
           delay: row * 0.32 + Math.abs(centre) * 0.07,
@@ -782,9 +860,48 @@ export class Game {
           nextShotY: 0,
           flash: 0,
           dead: false,
+          fireT: WAVE_GRACE + 1 + this.rng() * this.cfg.gunnerInterval,
+          noReturn: false,
+          speedMul: r.kind === "tank" ? 0.75 : 1,
         });
       }
     });
+  }
+
+  /** A splitter bursts into two mites that dive at once and never return. */
+  private spawnMites(x: number, y: number, count = 2): void {
+    for (let i = 0; i < count; i++) {
+      const dir = i % 2 === 0 ? -1 : 1;
+      this.enemies.push({
+        id: this.nextId++,
+        kind: "mite",
+        row: 0,
+        gx: 0,
+        x: x + dir * 4,
+        y,
+        hw: 3.5,
+        hh: 2.5,
+        hp: 1 + this.cfg.armor,
+        state: "attack",
+        t: 0,
+        delay: 0,
+        sx: x,
+        sy: y,
+        cx: x,
+        cy: y,
+        dir,
+        vx: dir * 55,
+        vy: this.cfg.diveSpeed * 0.5,
+        aim: dir * 6,
+        shotsLeft: 0,
+        nextShotY: 0,
+        flash: 0,
+        dead: false,
+        fireT: 0,
+        noReturn: true,
+        speedMul: 1.3,
+      });
+    }
   }
 
   private updateEnemies(dt: number): void {
@@ -809,6 +926,13 @@ export class Game {
           const slot = this.slotOf(e);
           e.x = slot.x;
           e.y = slot.y;
+          if (e.kind === "gunner" && this.phase === "playing" && p.alive && this.waveT > WAVE_GRACE) {
+            e.fireT -= dt;
+            if (e.fireT <= 0) {
+              e.fireT = this.cfg.gunnerInterval * (0.7 + 0.6 * this.rng());
+              this.spread(e.x, e.y + 4, 3, 0.42, this.cfg.bulletSpeed * 0.8);
+            }
+          }
           break;
         }
         case "peel": {
@@ -824,20 +948,26 @@ export class Game {
           break;
         }
         case "attack": {
-          e.vy = approach(e.vy, this.cfg.diveSpeed, 140 * dt);
-          const targetX = p.x + e.aim + Math.sin(e.t * 2.6 + e.id) * 14;
-          const maxVx = 60 + this.wave * 4;
-          e.vx = clamp(e.vx + clamp(targetX - e.x, -60, 60) * 3.2 * dt, -maxVx, maxVx);
+          const mite = e.kind === "mite";
+          e.vy = approach(e.vy, this.cfg.diveSpeed * e.speedMul, 140 * dt);
+          const targetX = p.x + e.aim + Math.sin(e.t * 2.6 + e.id) * (mite ? 5 : 14);
+          const maxVx = (60 + this.wave * 4) * (mite ? 1.4 : 1);
+          e.vx = clamp(e.vx + clamp(targetX - e.x, -60, 60) * (mite ? 5 : 3.2) * dt, -maxVx, maxVx);
           e.x = clamp(e.x + e.vx * dt, 6, VIEW_W - 6);
           e.y += e.vy * dt;
           if (e.shotsLeft > 0 && e.y >= e.nextShotY && e.y < PLAYER_Y - 36 && p.alive) {
-            this.enemyShoot(e, 0.7);
+            if (e.kind === "gunner") this.spread(e.x, e.y + 4, 3, 0.36, this.cfg.bulletSpeed);
+            else if (e.kind === "tank") this.spread(e.x, e.y + 4, 5, 0.9, this.cfg.bulletSpeed * 0.75);
+            else this.enemyShoot(e, 0.7);
             e.shotsLeft--;
             e.nextShotY += 22 + this.rng() * 14;
           }
           if (e.y > VIEW_H + 12) {
-            this.setState(e, "returning");
-            e.y = -12;
+            if (e.noReturn) e.dead = true;
+            else {
+              this.setState(e, "returning");
+              e.y = -12;
+            }
           }
           break;
         }
@@ -927,8 +1057,9 @@ export class Game {
     e.cx = e.x + dir * PEEL_RADIUS;
     e.cy = e.y;
     e.aim = aim;
-    e.shotsLeft = this.cfg.shotsPerDive;
-    e.nextShotY = 95 + this.rng() * 50;
+    // Tanks fire one wide fan per dive; everyone else follows the wave's shot count.
+    e.shotsLeft = e.kind === "tank" ? 1 : this.cfg.shotsPerDive;
+    e.nextShotY = (e.kind === "tank" ? 120 : 95) + this.rng() * 50;
   }
 
   /** `lead` is how much of the player's offset the shot corrects for (0 = straight down). */
@@ -940,6 +1071,204 @@ export class Game {
     this.emit("enemyShoot");
   }
 
+  /** `n` bolts fanned `arc` radians wide, centred on the player. */
+  private spread(x: number, y: number, n: number, arc: number, speed: number): void {
+    const aim = Math.atan2(this.player.y - y, this.player.x - x);
+    for (let i = 0; i < n; i++) {
+      const a = aim + (n === 1 ? 0 : (i / (n - 1) - 0.5) * arc);
+      this.enemyBullets.push({ x, y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, hw: 1, hh: 2.5, dead: false, pierce: 0, lastHit: -1 });
+    }
+    this.emit("enemyShoot");
+  }
+
+  /** One round bullet-hell shot. */
+  private orb(x: number, y: number, angle: number, speed: number, color: string): void {
+    if (this.enemyBullets.length > 420) return;
+    this.enemyBullets.push({
+      x,
+      y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      hw: 1.6,
+      hh: 1.6,
+      dead: false,
+      pierce: 0,
+      lastHit: -1,
+      style: "orb",
+      color,
+    });
+  }
+
+  // ---------------------------------------------------------------- boss
+
+  private spawnBoss(): void {
+    const def = bossFor(this.wave);
+    this.boss = {
+      name: def.name,
+      tier: def.tier,
+      x: VIEW_W / 2,
+      y: -24,
+      hw: 15,
+      hh: 6,
+      hp: def.hp,
+      maxHp: def.hp,
+      t: 0,
+      phase: 1,
+      calm: 3.2,
+      flash: 0,
+      shotT: 0,
+      altT: 1.2,
+      minionT: 6,
+      spin: 0,
+      pattern: 0,
+      dying: -1,
+    };
+    this.banner = { text: "WARNING", sub: `${def.name} APPROACHING`, sub2: "WEAVE THROUGH ITS FIRE", color: "#ff3b3b", subColor: "#ff4fd8", blink: true, t: 0, max: 3.2 };
+  }
+
+  private updateBoss(dt: number): void {
+    const b = this.boss;
+    if (!b) return;
+    b.t += dt;
+    b.flash = Math.max(0, b.flash - dt);
+
+    if (b.dying >= 0) {
+      b.dying += dt;
+      // Breaks apart in a string of explosions before the final blast.
+      if (Math.floor(b.dying * 9) !== Math.floor((b.dying - dt) * 9)) {
+        const x = b.x + (this.rng() - 0.5) * b.hw * 2;
+        const y = b.y + (this.rng() - 0.5) * b.hh * 2;
+        this.bursts.push({ x, y, t: 0, color: this.rng() < 0.5 ? "#ff4fd8" : "#ffd23a", big: this.rng() < 0.3 });
+        this.sparks(x, y, "#ff4fd8", 6);
+        this.shake = Math.max(this.shake, 3);
+        this.emit("enemyKill");
+      }
+      if (b.dying > 1.8) {
+        this.bursts.push({ x: b.x, y: b.y, t: 0, color: "#ffffff", big: true });
+        this.sparks(b.x, b.y, "#ff4fd8", 40);
+        this.sparks(b.x, b.y, "#ffd23a", 30);
+        this.sparks(b.x, b.y, "#ffffff", 20);
+        this.shake = 10;
+        for (let i = 0; i < 3; i++) this.drops.push({ x: b.x + (i - 1) * 14, y: b.y, hw: 3.5, hh: 3, t: 0, dead: false });
+        this.bossBeaten = b.name;
+        this.boss = null;
+        this.emit("bossDie");
+      }
+      return;
+    }
+
+    // Slide in from the top, then sweep from side to side, faster in later phases.
+    const speed = b.phase === 3 ? 0.85 : b.phase === 2 ? 0.65 : 0.5;
+    b.x = VIEW_W / 2 + Math.sin(b.t * speed) * (b.phase === 3 ? 84 : 70);
+    const homeY = 64 + Math.sin(b.t * 1.1) * 7;
+    b.y = b.y < homeY - 1 ? Math.min(homeY, b.y + 34 * dt) : homeY;
+
+    const frac = b.hp / b.maxHp;
+    const phase: 1 | 2 | 3 = frac > 2 / 3 ? 1 : frac > 1 / 3 ? 2 : 3;
+    if (phase !== b.phase) {
+      b.phase = phase;
+      b.calm = 1.2;
+      b.pattern = 0;
+      this.shake = Math.max(this.shake, 5);
+      this.banner = { text: phase === 3 ? "FINAL PHASE" : "PHASE 2", sub: b.name, color: "#ff4fd8", t: 0, max: 1.4 };
+      this.emit("bossPhase");
+    }
+    if (b.calm > 0) {
+      b.calm -= dt;
+      return;
+    }
+    if (!this.player.alive || this.phase !== "playing") return;
+
+    // Later bosses fire faster and denser, and any boss still alive after 75 seconds enrages,
+    // so a fight can never be stalled out.
+    const enraged = b.t > 75;
+    const tempo = (1 + 0.15 * b.tier) * (enraged ? 1.5 : 1);
+    const extra = 4 * b.tier;
+    const sp = 1 + 0.08 * b.tier;
+    const aim = Math.atan2(this.player.y - b.y, this.player.x - b.x);
+    b.shotT -= dt * tempo;
+    b.altT -= dt * tempo;
+    b.minionT -= dt;
+
+    if (b.phase === 1) {
+      // Alternates an aimed fan with a ring that has a gap to slip through.
+      if (b.shotT <= 0) {
+        b.shotT = 1.5;
+        if (b.pattern++ % 2 === 0) {
+          const n = 7 + Math.floor(extra / 2);
+          for (let i = 0; i < n; i++) this.orb(b.x, b.y + 5, aim + (i / (n - 1) - 0.5) * 1.1, 78 * sp, ORB.pink);
+        } else {
+          const n = 20 + extra;
+          const gap = Math.floor(this.rng() * n);
+          const rot = this.rng() * Math.PI * 2;
+          for (let i = 0; i < n; i++) {
+            if (Math.abs(i - gap) <= 1) continue;
+            this.orb(b.x, b.y, rot + (i / n) * Math.PI * 2, 58 * sp, ORB.cyan);
+          }
+        }
+        this.emit("enemyShoot");
+      }
+    } else if (b.phase === 2) {
+      // Two-armed spiral in bursts, plus aimed bolts from the wing cannons.
+      const firing = b.t % 3.6 < 2.6;
+      if (firing && b.shotT <= 0) {
+        b.shotT = 0.09;
+        b.spin += 0.3;
+        for (let arm = 0; arm < 2; arm++) this.orb(b.x, b.y + 2, b.spin + arm * Math.PI, 64 * sp, ORB.violet);
+      }
+      if (b.altT <= 0) {
+        b.altT = 2.1;
+        this.spread(b.x - 11, b.y + 4, 3, 0.3, 135 * sp);
+        this.spread(b.x + 11, b.y + 4, 3, 0.3, 135 * sp);
+      }
+      if (b.minionT <= 0) {
+        b.minionT = 7;
+        this.spawnMites(b.x, b.y + 6);
+      }
+    } else {
+      // Counter-rotating flower plus a slow ring: the densest part of the fight.
+      if (b.shotT <= 0) {
+        b.shotT = 0.13;
+        b.spin += 0.23;
+        for (let arm = 0; arm < 3; arm++) {
+          const a = (arm / 3) * Math.PI * 2;
+          this.orb(b.x, b.y + 2, b.spin + a, 56 * sp, ORB.pink);
+          this.orb(b.x, b.y + 2, -b.spin + a + 0.5, 56 * sp, ORB.yellow);
+        }
+      }
+      if (b.altT <= 0) {
+        b.altT = 3;
+        const n = 16 + extra;
+        const rot = aim + Math.PI / n;
+        for (let i = 0; i < n; i++) this.orb(b.x, b.y, rot + (i / n) * Math.PI * 2, 46 * sp, ORB.red);
+        this.emit("enemyShoot");
+      }
+      if (b.minionT <= 0) {
+        b.minionT = 6;
+        this.spawnMites(b.x, b.y + 6, 3);
+      }
+    }
+  }
+
+  private hitBoss(b: Boss): void {
+    this.stats.hits++;
+    b.hp--;
+    b.flash = 0.06;
+    this.sparks(b.x + (this.rng() - 0.5) * 16, b.y + 4, "#ff4fd8", 2);
+    this.emit("bossHit");
+    if (b.hp > 0) return;
+
+    b.dying = 0;
+    const mult = 1 + 0.25 * this.level("bounty");
+    const pts = Math.round((5000 * (b.tier + 1) * mult) / 10) * 10;
+    // Every bullet on screen turns into a small bonus when the boss goes down.
+    const cancelled = this.enemyBullets.length;
+    for (const eb of this.enemyBullets) this.sparks(eb.x, eb.y, eb.color ?? "#ffffff", 1);
+    this.enemyBullets = [];
+    this.addScore(pts + cancelled * 10);
+    this.popups.push({ x: b.x, y: b.y + 12, t: 0, text: `+${pts + cancelled * 10}`, color: "#ffd23a" });
+  }
+
   private updateBullets(dt: number): void {
     for (const b of this.bullets) {
       b.x += b.vx * dt;
@@ -949,7 +1278,7 @@ export class Game {
     for (const b of this.enemyBullets) {
       b.x += b.vx * dt;
       b.y += b.vy * dt;
-      if (b.y > VIEW_H + 6) b.dead = true;
+      if (b.y > VIEW_H + 6 || b.y < -10 || b.x < -10 || b.x > VIEW_W + 10) b.dead = true;
     }
   }
 
@@ -971,6 +1300,11 @@ export class Game {
         else b.dead = true;
         this.hitEnemy(e);
         if (b.dead) break;
+      }
+      const boss = this.boss;
+      if (!b.dead && boss && boss.dying < 0 && boss.y > 20 && overlaps(b, boss)) {
+        b.dead = true;
+        this.hitBoss(boss);
       }
     }
 
@@ -1000,10 +1334,18 @@ export class Game {
 
     if (p.invuln > 0) return;
 
+    // Round bullet-hell shots only count when they touch the ship's small core.
+    const core = { x: p.x, y: p.y + 0.5, hw: 1.5, hh: 1.5 };
     for (const b of this.enemyBullets) {
-      if (b.dead || !overlaps(b, p)) continue;
+      if (b.dead || !overlaps(b, b.style === "orb" ? core : p)) continue;
       b.dead = true;
-      this.damagePlayer(BULLET_DAMAGE);
+      this.damagePlayer(b.style === "orb" ? BULLET_DAMAGE * 0.75 : BULLET_DAMAGE);
+      if (!p.alive || p.invuln > 0) return;
+    }
+
+    const boss = this.boss;
+    if (boss && boss.dying < 0 && overlaps(boss, p)) {
+      this.damagePlayer(RAM_DAMAGE);
       if (!p.alive || p.invuln > 0) return;
     }
 
@@ -1030,6 +1372,10 @@ export class Game {
   private destroyEnemy(e: Enemy, award: boolean): void {
     e.dead = true;
     this.stats.kills++;
+    if (e.kind === "splitter") {
+      this.spawnMites(e.x, e.y);
+      this.emit("split");
+    }
     const inFlight = e.state !== "formation" && e.state !== "entering";
     if (award) {
       const mult = (1 + 0.25 * this.level("bounty")) * (this.anomaly === "bounty" ? 2 : 1);
@@ -1133,10 +1479,11 @@ export class Game {
 
   /** A four-note bass march that speeds up as the formation thins out. */
   private updateBeat(dt: number): void {
-    if (this.phase !== "playing" || this.enemies.length === 0 || this.waveT < 1) return;
+    if (this.phase !== "playing" || (this.enemies.length === 0 && !this.boss) || this.waveT < 1) return;
     this.beatT -= dt;
     if (this.beatT <= 0) {
-      this.beatT = 0.22 + 0.6 * (this.enemies.length / Math.max(1, this.waveTotal));
+      // Boss fights get a fast, steady pulse.
+      this.beatT = this.boss ? 0.24 : 0.22 + 0.6 * Math.min(1, this.enemies.length / Math.max(1, this.waveTotal));
       this.emit("beat");
     }
   }

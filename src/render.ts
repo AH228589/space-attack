@@ -1,5 +1,5 @@
 import { CARD_H, CARD_W, CARD_Y, COLORS, FIRE_COOLDOWN, VIEW_H, VIEW_W, cardX } from "./config";
-import { ANOMALIES, SCORES } from "./difficulty";
+import { ANOMALIES, SCORES, type EnemyKind } from "./difficulty";
 import { ENEMY_COLORS, type Game } from "./game";
 import { ordinal } from "./leaderboard";
 import { cardDef, describeBuild, type CardId, type Rarity } from "./perks";
@@ -141,6 +141,12 @@ export class Renderer {
       this.sprite(e.kind, calm ? slowFlap : fastFlap, e.x, e.y, e.flash > 0 ? COLORS.white : undefined);
     }
 
+    const boss = g.boss;
+    if (boss && (boss.dying < 0 || Math.floor(boss.dying * 14) % 2 === 0)) {
+      const tint = boss.flash > 0 || boss.dying >= 0 ? COLORS.white : undefined;
+      this.sprite("boss", Math.floor(g.time * 4) % 2, boss.x, boss.y, tint);
+    }
+
     for (const b of g.bullets) {
       this.rect(b.x - 0.5, b.y - 3, 1, 6, COLORS.white);
       ctx.globalAlpha = 0.45;
@@ -149,7 +155,15 @@ export class Renderer {
     }
     const flicker = Math.floor(g.time * 20) % 2 === 0;
     for (const b of g.enemyBullets) {
-      this.rect(b.x - 0.75, b.y - 2.5, 1.5, 5, flicker ? COLORS.white : "#ff8a8a");
+      if (b.style === "orb") {
+        ctx.fillStyle = b.color ?? COLORS.red;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+        this.rect(b.x - 0.75, b.y - 0.75, 1.5, 1.5, COLORS.white);
+      } else {
+        this.rect(b.x - 0.75, b.y - 2.5, 1.5, 5, flicker ? COLORS.white : "#ff8a8a");
+      }
     }
 
     for (const d of g.drops) {
@@ -175,6 +189,11 @@ export class Renderer {
       this.rect(p.x + 1.5, p.y + 4, 1, flame, COLORS.orange);
       this.sprite("player", 0, p.x, p.y);
       if (p.cooldown > FIRE_COOLDOWN - 0.05) this.rect(p.x - 1, p.y - 7, 2, 2, COLORS.white);
+      if (g.boss) {
+        // In a bullet hell only this core counts against round shots, so show it.
+        this.rect(p.x - 1.5, p.y - 1, 3, 3, COLORS.red);
+        this.rect(p.x - 0.5, p.y, 1, 1, COLORS.white);
+      }
     }
 
     for (const pt of g.particles) {
@@ -206,14 +225,23 @@ export class Renderer {
   // ---------------------------------------------------------------- HUD
 
   private drawTopHud(g: Game): void {
-    const show1up = g.phase !== "playing" || Math.floor(g.time * 2.5) % 2 === 0;
-    if (show1up) this.text("1UP", 58, 4, 6, COLORS.label);
+    // Ships left, where arcades put the blinking 1UP. Turns orange on the last ship.
+    const ships = Math.max(0, g.lives);
+    this.text(ships === 1 ? "LAST SHIP" : `SHIPS ${ships}`, 58, 4, 6, ships === 1 ? COLORS.orange : COLORS.label);
     this.text(pad(g.score, 6), 58, 13, 8, COLORS.score);
     this.text("HI-SCORE", 194, 4, 6, COLORS.label);
     this.text(pad(Math.max(g.hiScore, g.score), 6), 194, 13, 8, COLORS.score);
     if (g.anomaly && (g.phase === "playing" || g.phase === "paused")) {
       const a = ANOMALIES[g.anomaly];
       this.text(a.name, VIEW_W / 2, 24, 5, a.good ? COLORS.green : COLORS.red);
+    }
+    const boss = g.boss;
+    if (boss && boss.dying < 0 && boss.y > 0) {
+      this.text(boss.name, 28, 25, 5, "#ff4fd8", "left");
+      const enraged = boss.t > 75;
+      this.text(enraged ? "ENRAGED" : `PHASE ${boss.phase}`, 228, 25, 5, enraged ? COLORS.red : COLORS.dim, "right");
+      this.rect(28, 32, 200, 3, "#3a1036");
+      this.rect(28, 32, 200 * (boss.hp / boss.maxHp), 3, boss.flash > 0 ? COLORS.white : "#ff4fd8");
     }
   }
 
@@ -241,7 +269,7 @@ export class Renderer {
     const b = g.banner;
     if (!b) return;
     this.ctx.globalAlpha = Math.max(0, Math.min(1, b.t / 0.2, (b.max - b.t) / 0.35));
-    this.text(b.text, VIEW_W / 2, 136, 12, COLORS.cyan);
+    if (!b.blink || Math.floor(b.t * 4) % 2 === 0) this.text(b.text, VIEW_W / 2, 136, 12, b.color ?? COLORS.cyan);
     this.text(b.sub, VIEW_W / 2, 156, 6, b.subColor ?? COLORS.yellow);
     if (b.sub2) this.text(b.sub2, VIEW_W / 2, 167, 5, COLORS.text);
     this.ctx.globalAlpha = 1;
@@ -259,11 +287,13 @@ export class Renderer {
     this.logo("SPACE", 40 + bob, 24);
     this.logo("ATTACK", 68 + bob, 24);
 
-    // Attract mode: the instructions and the high score table take turns, as in an arcade.
-    const showTable = Math.floor(g.phaseT / 8) % 2 === 1;
-    if (showTable) {
+    // Attract mode: instructions, the enemy roster and the high score table take turns.
+    const page = Math.floor(g.phaseT / 7) % 3;
+    if (page === 2) {
       this.text("HIGH SCORES", VIEW_W / 2, 104, 8, COLORS.cyan);
       this.drawBoardRows(g, 120, 11);
+    } else if (page === 1) {
+      this.drawRoster(g);
     } else {
       this.text("FORMATION", 150, 104, 5, COLORS.dim);
       this.text("DIVING", 212, 104, 5, COLORS.dim);
@@ -321,8 +351,13 @@ export class Renderer {
     const d = g.draft;
     if (!d) return;
     this.dim(0.6);
-    this.text(`WAVE ${g.wave} CLEAR`, VIEW_W / 2, 38, 10, COLORS.cyan);
-    this.text("CHOOSE AN UPGRADE", VIEW_W / 2, 58, 7, COLORS.yellow);
+    if (d.bonus) {
+      this.text(`${g.bossBeaten} DEFEATED`, VIEW_W / 2, 38, 9, "#ff4fd8");
+      this.text("BOSS REWARD: RARER CARDS", VIEW_W / 2, 58, 6, COLORS.yellow);
+    } else {
+      this.text(`WAVE ${g.wave} CLEAR`, VIEW_W / 2, 38, 10, COLORS.cyan);
+      this.text("CHOOSE AN UPGRADE", VIEW_W / 2, 58, 7, COLORS.yellow);
+    }
     d.cards.forEach((id, i) => this.drawCard(g, id, i, i === d.sel));
 
     if (this.touch) {
@@ -428,6 +463,32 @@ export class Renderer {
       if (Math.floor(g.time * 2) % 2 === 0) this.text(again, VIEW_W / 2, 216, 6, COLORS.yellow);
       this.text(this.touch ? "PAUSE BUTTON FOR TITLE" : "ESC FOR TITLE SCREEN", VIEW_W / 2, 229, 5, COLORS.dim);
     }
+  }
+
+  /** Every enemy type, its points and the wave it first shows up. */
+  private drawRoster(g: Game): void {
+    this.text("ENEMY ROSTER", VIEW_W / 2, 104, 8, COLORS.cyan);
+    this.text("PTS", 150, 116, 4, COLORS.dim);
+    this.text("DIVING", 186, 116, 4, COLORS.dim);
+    this.text("FROM", 222, 116, 4, COLORS.dim);
+    const flap = Math.floor(g.time * 2.2) % 2;
+    const rows: [EnemyKind, string, string][] = [
+      ["drone", "DRONE", "1"],
+      ["hornet", "HORNET", "1"],
+      ["flagship", "FLAGSHIP", "1"],
+      ["gunner", "GUNNER", "4"],
+      ["splitter", "SPLITTER", "5"],
+      ["tank", "TANK", "7"],
+    ];
+    rows.forEach(([kind, name, from], i) => {
+      const y = 130 + i * 13;
+      this.sprite(kind, flap, 40, y);
+      this.text(name, 56, y - 3, 6, ENEMY_COLORS[kind], "left");
+      this.text(String(SCORES[kind][0]), 150, y - 3, 6, COLORS.text);
+      this.text(String(SCORES[kind][1]), 186, y - 3, 6, COLORS.text);
+      this.text(from, 222, y - 3, 6, COLORS.dim);
+    });
+    this.text("EVERY 10TH WAVE: BOSS FIGHT", VIEW_W / 2, 214, 6, "#ff4fd8");
   }
 
   /** The leaderboard rows, shared by the title's attract mode and the results screen. */

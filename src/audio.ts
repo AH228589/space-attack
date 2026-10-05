@@ -9,6 +9,8 @@ export class Sfx {
   private master: GainNode | null = null;
   private noiseBuf: AudioBuffer | null = null;
   private beatIndex = 0;
+  /** Last time a boss hit tick played, so a stream of hits does not become noise. */
+  private lastBossHit = 0;
 
   /** Browsers only allow audio after a user gesture, so this runs on the first key press. */
   unlock(): void {
@@ -95,6 +97,31 @@ export class Sfx {
         break;
       case "confirm":
         this.tone("square", 1320, 1760, 0.08, 0.05);
+        break;
+      case "split":
+        this.tone("square", 520, 1200, 0.07, 0.05);
+        break;
+      case "bossWarning":
+        for (let i = 0; i < 4; i++) {
+          this.tone("sawtooth", 440, 440, 0.22, 0.06, i * 0.5);
+          this.tone("sawtooth", 330, 330, 0.22, 0.06, i * 0.5 + 0.25);
+        }
+        break;
+      case "bossHit": {
+        const now = this.ctx.currentTime;
+        if (now - this.lastBossHit < 0.07) break;
+        this.lastBossHit = now;
+        this.tone("square", 180, 120, 0.04, 0.035);
+        break;
+      }
+      case "bossPhase":
+        this.tone("sawtooth", 900, 120, 0.6, 0.09);
+        this.noise(0.5, 0.12, 3000, 200);
+        break;
+      case "bossDie":
+        this.noise(1.6, 0.3, 4000, 60);
+        this.tone("sawtooth", 300, 25, 1.5, 0.12);
+        [523, 659, 784, 1047, 1319].forEach((f, i) => this.tone("square", f, f, 0.12, 0.05, 0.6 + i * 0.1));
         break;
       case "submit":
         [784, 988, 1175, 1568, 1175, 1568].forEach((f, i) => this.tone("square", f, f, 0.08, 0.05, i * 0.08));

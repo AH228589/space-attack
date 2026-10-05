@@ -307,7 +307,7 @@ describe("roguelike upgrades and anomalies", () => {
     g.shieldUp = true;
     g.update(STEP, { ...NO_CONTROLS, fire: true });
     expect(g.bullets).toHaveLength(2);
-    expect(g.maxEnergy).toBe(MAX_ENERGY + 50);
+    expect(g.maxEnergy).toBe(MAX_ENERGY + 40);
 
     const before = g.player.energy;
     shootPlayer(g);
@@ -369,5 +369,103 @@ describe("leaderboard rules", () => {
     expect(ordinal(2)).toBe("2ND");
     expect(ordinal(3)).toBe("3RD");
     expect(ordinal(11)).toBe("11TH");
+  });
+});
+
+describe("bosses and new enemy types", () => {
+  it("brings in a new enemy type at waves 4, 5 and 7 and a boss every 10th wave", () => {
+    const kinds = (n: number) => waveConfig(n).rows.map((r) => r.kind);
+    expect(kinds(3)).not.toContain("gunner");
+    expect(kinds(4)).toContain("gunner");
+    expect(kinds(5)).toContain("splitter");
+    expect(kinds(7)).toContain("tank");
+    expect(waveConfig(9).boss).toBe(false);
+    expect(waveConfig(10).boss).toBe(true);
+    expect(waveConfig(20).boss).toBe(true);
+    // Calm waves get no anomaly: introductions, bosses, and the start of a sector.
+    for (const n of [4, 5, 7, 10, 11, 20]) expect(rollAnomaly(n, seeded())).toBeNull();
+    // After a boss, everything needs one more hit.
+    expect(waveConfig(11).armor).toBe(1);
+  });
+
+  it("a splitter bursts into two mites that leave for good", () => {
+    const g = new Game({ rng: seeded(2) });
+    g.startGame(5);
+    run(g, 4);
+    const sp = g.enemies.find((e) => e.kind === "splitter" && e.state === "formation")!;
+    const before = g.enemies.length;
+    g.bullets.push({ x: sp.x, y: sp.y, vx: 0, vy: 0, hw: 1, hh: 3, dead: false, pierce: 0, lastHit: -1 });
+    g.update(STEP, NO_CONTROLS);
+    const mites = g.enemies.filter((e) => e.kind === "mite");
+    expect(mites).toHaveLength(2);
+    expect(g.enemies.length).toBe(before + 1);
+    for (const m of mites) m.y = 400;
+    g.update(STEP, NO_CONTROLS);
+    expect(g.enemies.some((e) => e.kind === "mite")).toBe(false);
+  });
+
+  it("round shots only hurt the ship's core, bolts hurt the whole hull", () => {
+    const g = newGame();
+    const p = g.player;
+    g.enemyBullets.push({ x: p.x + 4, y: p.y, vx: 0, vy: 0, hw: 1.6, hh: 1.6, dead: false, pierce: 0, lastHit: -1, style: "orb" });
+    g.update(STEP, NO_CONTROLS);
+    expect(p.energy).toBe(MAX_ENERGY);
+    g.enemyBullets.push({ x: p.x + 4, y: p.y, vx: 0, vy: 0, hw: 1, hh: 2.5, dead: false, pierce: 0, lastHit: -1 });
+    g.update(STEP, NO_CONTROLS);
+    expect(p.energy).toBeLessThan(MAX_ENERGY);
+  });
+
+  it("the boss fights in phases, fires bullet-hell patterns, and pays out a rare draft", () => {
+    const events: GameEvent[] = [];
+    const g = new Game({ rng: seeded(4), onEvent: (e) => events.push(e) });
+    g.startGame(10);
+    expect(g.boss).not.toBeNull();
+    expect(g.enemies).toHaveLength(0);
+    expect(g.banner?.text).toBe("WARNING");
+    expect(events).toContain("bossWarning");
+
+    // Keep the ship out of harm's way while the patterns play out.
+    g.player.invuln = 1e9;
+    run(g, 6);
+    expect(g.enemyBullets.some((b) => b.style === "orb")).toBe(true);
+
+    const boss = g.boss!;
+    boss.hp = Math.floor(boss.maxHp / 2);
+    run(g, 0.1);
+    expect(boss.phase).toBe(2);
+    expect(events).toContain("bossPhase");
+
+    boss.hp = 1;
+    g.bullets.push({ x: boss.x, y: boss.y, vx: 0, vy: 0, hw: 1, hh: 3, dead: false, pierce: 0, lastHit: -1 });
+    const scoreBefore = g.score;
+    g.update(STEP, NO_CONTROLS);
+    expect(boss.dying).toBeGreaterThanOrEqual(0);
+    expect(g.enemyBullets).toHaveLength(0);
+    expect(g.score).toBeGreaterThanOrEqual(scoreBefore + 5000);
+
+    g.enemies = [];
+    run(g, 2);
+    expect(g.boss).toBeNull();
+    expect(events).toContain("bossDie");
+    g.enemies = [];
+    run(g, 2.5);
+    expect(g.phase).toBe("draft");
+    expect(g.draft?.bonus).toBe(true);
+    run(g, 0.6);
+    g.update(STEP, { ...NO_CONTROLS, firePressed: true });
+    expect(g.wave).toBe(11);
+    expect(g.enemies.find((e) => e.kind === "drone")?.hp).toBe(2);
+  });
+
+  it("survives five minutes of random play through a boss fight", () => {
+    const rng = seeded(77);
+    const g = new Game({ rng: seeded(8) });
+    g.startGame(10);
+    for (let t = 0; t < 300; t += STEP) {
+      g.player.invuln = Math.max(g.player.invuln, 0.5);
+      g.update(STEP, { ...NO_CONTROLS, left: rng() < 0.4, right: rng() < 0.4, fire: true, firePressed: rng() < 0.02 });
+      for (const b of g.enemyBullets) expect(Number.isFinite(b.x) && Number.isFinite(b.y)).toBe(true);
+    }
+    expect(g.wave).toBeGreaterThanOrEqual(10);
   });
 });
