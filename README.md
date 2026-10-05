@@ -9,6 +9,10 @@ sprites are text grids and every sound is synthesised with WebAudio.
 
 ## Play
 
+Live: https://space-attack-gilt.vercel.app
+
+Run it locally:
+
 ```bash
 npm install
 npm run dev
