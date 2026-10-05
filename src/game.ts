@@ -265,7 +265,7 @@ export class Game {
         if (c.start || c.firePressed) this.startGame();
         break;
       case "paused":
-        if (c.pause || c.start) this.setPhase("playing");
+        if (c.pause || c.start || c.firePressed) this.setPhase("playing");
         else if (c.quit) this.toTitle();
         break;
       case "playing":

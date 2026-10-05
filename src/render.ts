@@ -3,6 +3,8 @@ import { SCORES } from "./difficulty";
 import { ENEMY_COLORS, type Game } from "./game";
 import { SpriteCache, spriteSize, type SpriteName } from "./sprites";
 
+// Canvas fonts need a CSS length, but text is drawn under the screen transform, so the "px" in
+// these font strings are reference-grid cells that scale with the screen, not screen pixels.
 const FONT = '"Press Start 2P", monospace';
 const pad = (n: number, len: number) => String(n).padStart(len, "0");
 
@@ -15,6 +17,8 @@ export class Renderer {
   private readonly ctx: CanvasRenderingContext2D;
   private readonly sprites = new SpriteCache();
   private s = 1;
+  /** Show touch wording ("TAP TO START") instead of keyboard wording. */
+  private touch = false;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     this.ctx = canvas.getContext("2d", { alpha: false })!;
@@ -32,8 +36,9 @@ export class Renderer {
     this.s = w / VIEW_W;
   }
 
-  draw(g: Game, muted: boolean): void {
+  draw(g: Game, muted: boolean, touch: boolean): void {
     const { ctx, s } = this;
+    this.touch = touch;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1;
     ctx.imageSmoothingEnabled = false;
@@ -67,7 +72,7 @@ export class Renderer {
 
     this.drawTopHud(g);
     this.drawBottomHud(g);
-    this.drawBanner(g);
+    if (g.phase !== "paused") this.drawBanner(g);
     if (g.hintT > 0 && g.phase === "playing") {
       ctx.globalAlpha = Math.min(1, g.hintT);
       this.drawControlsHint(206);
@@ -185,7 +190,7 @@ export class Renderer {
   }
 
   private drawMute(muted: boolean): void {
-    if (muted) this.text("SOUND OFF (M)", VIEW_W / 2, 24, 5, COLORS.dim);
+    if (muted) this.text(this.touch ? "SOUND OFF" : "SOUND OFF (M)", VIEW_W / 2, 24, 5, COLORS.dim);
   }
 
   // ---------------------------------------------------------------- screens
@@ -209,7 +214,8 @@ export class Renderer {
 
     this.drawControlsPanel(170);
 
-    if (Math.floor(g.time * 2) % 2 === 0) this.text("PRESS ENTER TO START", VIEW_W / 2, 238, 8, COLORS.yellow);
+    const prompt = this.touch ? "TAP TO START" : "ENTER OR CLICK TO START";
+    if (Math.floor(g.time * 2) % 2 === 0) this.text(prompt, VIEW_W / 2, 238, 8, COLORS.yellow);
     this.text("EXTRA SHIP EVERY 10000 PTS", VIEW_W / 2, 256, 5, COLORS.dim);
     this.text("SURVIVE THE WAVES. THEY ONLY GET FASTER.", VIEW_W / 2, 268, 4, COLORS.dim);
     ctx.globalAlpha = 1;
@@ -219,8 +225,8 @@ export class Renderer {
     this.dim(0.65);
     this.text("PAUSED", VIEW_W / 2, 92, 16, COLORS.cyan);
     this.drawControlsPanel(128);
-    this.text("P OR ENTER TO RESUME", VIEW_W / 2, 196, 6, COLORS.yellow);
-    this.text("Q TO QUIT TO TITLE", VIEW_W / 2, 210, 6, COLORS.dim);
+    this.text(this.touch ? "TAP TO RESUME" : "P, ENTER OR CLICK TO RESUME", VIEW_W / 2, 196, 6, COLORS.yellow);
+    if (!this.touch) this.text("Q TO QUIT TO TITLE", VIEW_W / 2, 210, 6, COLORS.dim);
   }
 
   private drawGameOver(g: Game): void {
@@ -241,8 +247,9 @@ export class Renderer {
     });
 
     if (g.phaseT > 1.2) {
-      if (Math.floor(g.time * 2) % 2 === 0) this.text("PRESS ENTER TO PLAY AGAIN", VIEW_W / 2, 196, 7, COLORS.yellow);
-      this.text("ESC FOR TITLE SCREEN", VIEW_W / 2, 212, 6, COLORS.dim);
+      const again = this.touch ? "TAP TO PLAY AGAIN" : "ENTER OR CLICK TO PLAY AGAIN";
+      if (Math.floor(g.time * 2) % 2 === 0) this.text(again, VIEW_W / 2, 196, 7, COLORS.yellow);
+      this.text(this.touch ? "PAUSE BUTTON FOR TITLE" : "ESC FOR TITLE SCREEN", VIEW_W / 2, 212, 6, COLORS.dim);
     }
   }
 
@@ -250,6 +257,17 @@ export class Renderer {
   private drawControlsPanel(y: number): void {
     const keysRight = 118;
     const labelX = 130;
+    if (this.touch) {
+      this.key("LEFT", keysRight - 24, y);
+      this.key("RIGHT", keysRight - 11, y);
+      this.text("MOVE", labelX, y + 3, 6, COLORS.text, "left");
+      this.key("FIRE", keysRight - 30, y + 16, 30);
+      this.text("FIRE (HOLD)", labelX, y + 19, 6, COLORS.text, "left");
+      this.text("OR TAP THE SCREEN", labelX, y + 28, 4, COLORS.dim, "left");
+      this.key("II", keysRight - 11, y + 36);
+      this.text("PAUSE", labelX, y + 39, 6, COLORS.text, "left");
+      return;
+    }
     // Move
     let x = keysRight - 11;
     this.key("RIGHT", x, y);
@@ -262,6 +280,8 @@ export class Renderer {
     // Fire
     const spaceW = 34;
     this.key("SPACE", keysRight - spaceW, y + 16, spaceW);
+    this.text("OR", keysRight - spaceW - 10, y + 19, 5, COLORS.dim);
+    this.key("CLICK", keysRight - spaceW - 50, y + 16, 30);
     this.text("FIRE (HOLD)", labelX, y + 19, 6, COLORS.text, "left");
     // Pause and sound
     this.key("P", keysRight - 11, y + 32);
@@ -272,6 +292,12 @@ export class Renderer {
 
   /** A one-line reminder shown over the playfield at the start of a game. */
   private drawControlsHint(y: number): void {
+    if (this.touch) {
+      const startX = 44;
+      this.key("FIRE", startX, y, 30);
+      this.text("OR TAP THE SCREEN TO FIRE", startX + 34, y + 3.5, 5, COLORS.text, "left");
+      return;
+    }
     const startX = 34;
     this.key("LEFT", startX, y);
     this.key("RIGHT", startX + 13, y);

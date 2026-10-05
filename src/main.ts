@@ -38,8 +38,17 @@ const game = new Game({
 game.hiScore = Number(load(HI_KEY)) || 0;
 
 const input = new Input(window);
-input.onAnyKey = () => sfx.unlock();
+input.onAnyInput = () => sfx.unlock();
+input.bindScreen(canvas);
+document.querySelectorAll<HTMLElement>(".pad").forEach((pad) => input.bindPad(pad));
+const muteBtn = document.getElementById("mute-btn")!;
 const renderer = new Renderer(canvas);
+
+/** Shows the on-screen buttons only while the player is using touch. */
+function syncTouchUi(): void {
+  document.body.classList.toggle("touch", input.touchMode);
+  muteBtn.classList.toggle("muted", sfx.muted);
+}
 
 // Leaving the tab mid-game pauses it instead of letting the player die off screen.
 document.addEventListener("visibilitychange", () => {
@@ -71,13 +80,14 @@ function frame(now: number): void {
   }
   if (stepped) input.clearPressed();
 
+  syncTouchUi();
   renderer.resize();
-  renderer.draw(game, sfx.muted);
+  renderer.draw(game, sfx.muted, input.touchMode);
   requestAnimationFrame(frame);
 }
 
 // Wait for the arcade font so the first frames are not drawn in a fallback face.
-Promise.race([document.fonts.load('16px "Press Start 2P"'), new Promise((r) => setTimeout(r, 1500))]).finally(() => {
+Promise.race([document.fonts.load('1rem "Press Start 2P"'), new Promise((r) => setTimeout(r, 1500))]).finally(() => {
   last = performance.now();
   requestAnimationFrame(frame);
 });

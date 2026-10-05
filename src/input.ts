@@ -18,35 +18,110 @@ const BINDINGS: Record<string, Action> = {
   KeyM: "mute",
 };
 
-/** Keyboard state: which actions are held, and which went down since the game last read them. */
+/** Keeps a pointer's events coming to `el` after it leaves it; harmless if the browser refuses. */
+function capture(el: HTMLElement, pointerId: number): void {
+  try {
+    el.setPointerCapture(pointerId);
+  } catch {
+    /* pointer already gone */
+  }
+}
+
+/** Actions a finger may slide onto while held; pause and mute only react to a fresh press. */
+const SLIDABLE = new Set<Action>(["left", "right", "fire"]);
+
+/**
+ * Keyboard, mouse and touch, merged into one set of actions: which are held, and which went down
+ * since the game last read them. Each pointer (mouse or finger) holds at most one action.
+ */
 export class Input {
-  private held = new Set<Action>();
+  /** True when the last input came from a finger or pen; decides which hints and buttons show. */
+  touchMode: boolean;
+  /** Called on every key press or pointer event; used to unlock audio on the first interaction. */
+  onAnyInput: () => void = () => {};
+
+  private keys = new Set<Action>();
+  private pointers = new Map<number, Action | null>();
   private pressed = new Set<Action>();
-  /** Called on every key press; used to unlock audio on the first interaction. */
-  onAnyKey: () => void = () => {};
+  private buttons: HTMLElement[] = [];
 
   constructor(target: Window) {
+    this.touchMode = target.matchMedia("(pointer: coarse)").matches;
     target.addEventListener("keydown", (ev) => {
+      this.onAnyInput();
       const action = BINDINGS[ev.code];
-      this.onAnyKey();
       if (!action) return;
+      this.touchMode = false;
       ev.preventDefault();
       if (!ev.repeat) this.pressed.add(action);
-      this.held.add(action);
+      this.keys.add(action);
     });
     target.addEventListener("keyup", (ev) => {
       const action = BINDINGS[ev.code];
-      if (action) this.held.delete(action);
+      if (action) this.keys.delete(action);
     });
-    // Releasing keys while the window is in the background never fires keyup.
-    target.addEventListener("blur", () => this.held.clear());
+    // Releasing keys or fingers while the window is in the background never reports the release.
+    target.addEventListener("blur", () => {
+      this.keys.clear();
+      this.pointers.clear();
+      this.refreshButtons();
+    });
+  }
+
+  /** Pressing (or holding) the game screen with the mouse or a finger fires. */
+  bindScreen(el: HTMLElement): void {
+    el.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      this.notePointer(ev);
+      capture(el, ev.pointerId);
+      this.hold(ev.pointerId, "fire");
+    });
+    const release = (ev: PointerEvent) => {
+      this.onAnyInput();
+      this.release(ev.pointerId);
+    };
+    el.addEventListener("pointerup", release);
+    el.addEventListener("pointercancel", release);
+    el.addEventListener("lostpointercapture", release);
+  }
+
+  /**
+   * On-screen buttons. A pad captures its pointers, so a thumb can slide from one button to the
+   * next (left to right, say) without lifting.
+   */
+  bindPad(pad: HTMLElement): void {
+    this.buttons.push(...pad.querySelectorAll<HTMLElement>("[data-action]"));
+    const actionAt = (ev: PointerEvent): Action | null => {
+      const hit = document.elementFromPoint(ev.clientX, ev.clientY)?.closest<HTMLElement>("[data-action]");
+      return hit && pad.contains(hit) ? (hit.dataset.action as Action) : null;
+    };
+    pad.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      this.notePointer(ev);
+      capture(pad, ev.pointerId);
+      this.hold(ev.pointerId, actionAt(ev));
+    });
+    pad.addEventListener("pointermove", (ev) => {
+      if (!this.pointers.has(ev.pointerId)) return;
+      const action = actionAt(ev);
+      if (action === null || SLIDABLE.has(action)) this.hold(ev.pointerId, action);
+    });
+    const release = (ev: PointerEvent) => {
+      this.onAnyInput();
+      this.release(ev.pointerId);
+    };
+    pad.addEventListener("pointerup", release);
+    pad.addEventListener("pointercancel", release);
+    pad.addEventListener("lostpointercapture", release);
+    pad.addEventListener("contextmenu", (ev) => ev.preventDefault());
   }
 
   controls(): Controls {
     return {
-      left: this.held.has("left"),
-      right: this.held.has("right"),
-      fire: this.held.has("fire"),
+      left: this.isHeld("left"),
+      right: this.isHeld("right"),
+      fire: this.isHeld("fire"),
       firePressed: this.pressed.has("fire"),
       start: this.pressed.has("start"),
       pause: this.pressed.has("pause"),
@@ -54,12 +129,37 @@ export class Input {
     };
   }
 
-  /** True once per press of the mute key. */
+  /** True once per press of the mute key or button. */
   takeMute(): boolean {
     return this.pressed.delete("mute");
   }
 
   clearPressed(): void {
     this.pressed.clear();
+  }
+
+  private notePointer(ev: PointerEvent): void {
+    this.onAnyInput();
+    if (ev.pointerType !== "mouse") this.touchMode = true;
+  }
+
+  private hold(id: number, action: Action | null): void {
+    if (action && this.pointers.get(id) !== action) this.pressed.add(action);
+    this.pointers.set(id, action);
+    this.refreshButtons();
+  }
+
+  private release(id: number): void {
+    if (this.pointers.delete(id)) this.refreshButtons();
+  }
+
+  private isHeld(action: Action): boolean {
+    if (this.keys.has(action)) return true;
+    for (const a of this.pointers.values()) if (a === action) return true;
+    return false;
+  }
+
+  private refreshButtons(): void {
+    for (const b of this.buttons) b.classList.toggle("held", this.isHeld(b.dataset.action as Action));
   }
 }

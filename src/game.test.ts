@@ -167,6 +167,17 @@ describe("game flow", () => {
     expect(g.waveT).toBe(t);
     g.update(STEP, { ...NO_CONTROLS, pause: true });
     expect(g.phase).toBe("playing");
+
+    // A click or tap (a fresh fire press) also resumes.
+    g.update(STEP, { ...NO_CONTROLS, pause: true });
+    g.update(STEP, { ...NO_CONTROLS, fire: true, firePressed: true });
+    expect(g.phase).toBe("playing");
+  });
+
+  it("a click or tap starts the game from the title screen", () => {
+    const g = new Game({ rng: seeded() });
+    g.update(STEP, { ...NO_CONTROLS, fire: true, firePressed: true });
+    expect(g.phase).toBe("playing");
   });
 
   it("survives ten minutes of random play without breaking", () => {

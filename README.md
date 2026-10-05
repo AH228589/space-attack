@@ -23,11 +23,15 @@ Then open http://localhost:5194.
 | Key | Action |
 | --- | --- |
 | Left / Right arrows, or A / D | Move |
-| Space (hold for auto-fire) | Fire |
-| Enter | Start, restart |
+| Space, or click / hold the mouse on the game (hold for auto-fire) | Fire |
+| Enter, or click the game | Start, restart, resume |
 | P or Esc | Pause and resume |
 | Q (while paused) | Quit to the title screen |
 | M | Sound on or off |
+
+On phones and tablets, on-screen buttons appear as soon as you touch the screen: left and right
+under your left thumb, a big FIRE button under your right, plus pause and sound. Tapping the game
+screen also fires, starts and resumes. Upright, the buttons sit below the game; sideways, they flank it.
 
 ## What is in it
 
@@ -47,6 +51,8 @@ Then open http://localhost:5194.
   `src/difficulty.ts`, and a line under each wave banner says what just got harder.
 - **Game over screen** with score, wave reached, kills and accuracy, then Enter to play again.
 - Auto-pause when the tab loses focus, sound toggle remembered between visits.
+- **Every screen size**: the page is laid out in rem and viewport units only, the game screen keeps its
+  shape and grows or shrinks to fit, and the in-game wording switches between keyboard and touch.
 
 ## How it is built
 
@@ -58,7 +64,7 @@ src/
   collision.ts    box overlap test
   render.ts       canvas drawing: world, HUD, title, pause and game over screens
   sprites.ts      sprite grids and a cache that renders them at the current screen scale
-  input.ts        keyboard bindings, held keys and fresh presses
+  input.ts        keyboard, mouse and touch merged into actions: held and freshly pressed
   audio.ts        WebAudio sound effects
   main.ts         wiring, fixed-step game loop, hi-score storage
   game.test.ts    tests for rules, flow and the difficulty curve
