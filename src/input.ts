@@ -53,6 +53,12 @@ export class Input {
   private typed = "";
   /** Where the game screen was last pressed, on the reference grid. */
   private tap: { x: number; y: number } | null = null;
+  /** Where a press on the game screen was let go, on the reference grid. */
+  private lift: { x: number; y: number } | null = null;
+  /** The mouse over the game screen, or a finger held on it, on the reference grid. */
+  private point: { x: number; y: number } | null = null;
+  /** Pointers currently pressing the game screen (not the on-screen buttons). */
+  private screenPointers = new Set<number>();
   private buttons: HTMLElement[] = [];
 
   constructor(target: Window) {
@@ -84,17 +90,32 @@ export class Input {
 
   /** Pressing (or holding) the game screen with the mouse or a finger fires. */
   bindScreen(el: HTMLElement): void {
+    const toGrid = (ev: PointerEvent) => {
+      const r = el.getBoundingClientRect();
+      return { x: ((ev.clientX - r.left) / r.width) * VIEW_W, y: ((ev.clientY - r.top) / r.height) * VIEW_H };
+    };
     el.addEventListener("pointerdown", (ev) => {
       if (ev.button !== 0) return;
       ev.preventDefault();
       this.notePointer(ev);
       capture(el, ev.pointerId);
-      const r = el.getBoundingClientRect();
-      this.tap = { x: ((ev.clientX - r.left) / r.width) * VIEW_W, y: ((ev.clientY - r.top) / r.height) * VIEW_H };
+      this.tap = this.point = toGrid(ev);
+      this.screenPointers.add(ev.pointerId);
       this.hold(ev.pointerId, "fire");
+    });
+    el.addEventListener("pointermove", (ev) => {
+      // A finger only points while it is down; a mouse points whenever it is over the screen.
+      if (ev.pointerType === "mouse" || this.screenPointers.has(ev.pointerId)) this.point = toGrid(ev);
+    });
+    el.addEventListener("pointerleave", (ev) => {
+      if (ev.pointerType === "mouse" && !this.screenPointers.has(ev.pointerId)) this.point = null;
     });
     const release = (ev: PointerEvent) => {
       this.onAnyInput();
+      if (this.screenPointers.delete(ev.pointerId)) {
+        if (ev.type === "pointerup") this.lift = toGrid(ev);
+        if (ev.pointerType !== "mouse") this.point = null;
+      }
       this.release(ev.pointerId);
     };
     el.addEventListener("pointerup", release);
@@ -149,6 +170,8 @@ export class Input {
       back: this.pressed.has("back"),
       typed: this.typed,
       tap: this.tap,
+      lift: this.lift,
+      point: this.point,
     };
   }
 
@@ -161,6 +184,7 @@ export class Input {
     this.pressed.clear();
     this.typed = "";
     this.tap = null;
+    this.lift = null;
   }
 
   private notePointer(ev: PointerEvent): void {

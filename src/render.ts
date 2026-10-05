@@ -358,10 +358,14 @@ export class Renderer {
       this.text(`WAVE ${g.wave} CLEAR`, VIEW_W / 2, 38, 10, COLORS.cyan);
       this.text("CHOOSE AN UPGRADE", VIEW_W / 2, 58, 7, COLORS.yellow);
     }
-    d.cards.forEach((id, i) => this.drawCard(g, id, i, i === d.sel));
+    // Cards fade in while they are not yet armed, so an early tap visibly does nothing.
+    this.ctx.globalAlpha = Math.min(1, g.phaseT / 0.5);
+    d.cards.forEach((id, i) => this.drawCard(g, id, i, i === d.sel, i === d.press));
+    this.ctx.globalAlpha = 1;
 
     if (this.touch) {
-      this.text("TAP A CARD TO TAKE IT", VIEW_W / 2, 206, 6, COLORS.text);
+      this.text("TOUCH A CARD, LIFT TO TAKE IT", VIEW_W / 2, 204, 5, COLORS.text);
+      this.text("OR USE THE ARROWS AND TAKE", VIEW_W / 2, 214, 4, COLORS.dim);
     } else {
       const y = 204;
       this.key("LEFT", 58, y);
@@ -374,23 +378,25 @@ export class Renderer {
     this.drawBuild(g, 236);
   }
 
-  private drawCard(g: Game, id: CardId, i: number, selected: boolean): void {
+  private drawCard(g: Game, id: CardId, i: number, selected: boolean, pressed: boolean): void {
     const { ctx } = this;
     const def = cardDef(id);
     const color = RARITY_COLOR[def.rarity];
     const x = cardX(i);
-    const y = CARD_Y + (selected ? -3 : 0);
+    // Selected cards lift; a card under a finger or held mouse sinks back like a pressed button.
+    const y = CARD_Y + (pressed ? 0 : selected ? -3 : 0);
     const cx = x + CARD_W / 2;
 
-    ctx.fillStyle = selected ? "#18205a" : "#0d1130";
-    ctx.strokeStyle = color;
-    ctx.lineWidth = selected ? 1.5 : 0.6;
-    ctx.globalAlpha = selected ? 1 : 0.85;
+    const fade = ctx.globalAlpha;
+    ctx.fillStyle = pressed ? "#26307a" : selected ? "#18205a" : "#0d1130";
+    ctx.strokeStyle = pressed ? COLORS.white : color;
+    ctx.lineWidth = selected || pressed ? 1.5 : 0.6;
+    ctx.globalAlpha = fade * (selected ? 1 : 0.85);
     ctx.beginPath();
     ctx.roundRect(x, y, CARD_W, CARD_H, 4);
     ctx.fill();
     ctx.stroke();
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = fade;
 
     this.text(def.rarity.toUpperCase(), cx, y + 7, 4, color);
     this.text(CARD_GLYPH[id], cx, y + 20, 14, color);

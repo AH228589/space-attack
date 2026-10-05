@@ -469,3 +469,53 @@ describe("bosses and new enemy types", () => {
     expect(g.wave).toBeGreaterThanOrEqual(10);
   });
 });
+
+describe("picking cards by touch or mouse", () => {
+  /** Opens the first draft and waits until the cards are armed. */
+  function draftReady(): Game {
+    const g = newGame();
+    g.enemies = [];
+    run(g, 2);
+    run(g, 0.6);
+    return g;
+  }
+  const centre = (i: number) => ({ x: [46, 128, 210][i], y: 138 });
+
+  it("press and lift on a card takes it", () => {
+    const g = draftReady();
+    const card = g.draft!.cards[0];
+    g.update(STEP, { ...NO_CONTROLS, fire: true, firePressed: true, tap: centre(0), point: centre(0) });
+    expect(g.phase).toBe("draft");
+    expect(g.draft!.press).toBe(0);
+    g.update(STEP, { ...NO_CONTROLS, lift: centre(0) });
+    expect(g.phase).toBe("playing");
+    if (card !== "fix") expect(g.level(card)).toBe(1);
+  });
+
+  it("sliding a finger to another card moves the pick there", () => {
+    const g = draftReady();
+    const card = g.draft!.cards[2];
+    g.update(STEP, { ...NO_CONTROLS, fire: true, firePressed: true, tap: centre(0), point: centre(0) });
+    g.update(STEP, { ...NO_CONTROLS, fire: true, point: centre(2) });
+    expect(g.draft!.sel).toBe(2);
+    g.update(STEP, { ...NO_CONTROLS, lift: centre(2) });
+    if (card !== "fix") expect(g.level(card)).toBe(1);
+    expect(g.wave).toBe(2);
+  });
+
+  it("lifting off the cards cancels, and a press before the cards arm never counts", () => {
+    const g = draftReady();
+    g.update(STEP, { ...NO_CONTROLS, fire: true, firePressed: true, tap: centre(1), point: centre(1) });
+    g.update(STEP, { ...NO_CONTROLS, lift: { x: 128, y: 250 } });
+    expect(g.phase).toBe("draft");
+
+    const h = newGame();
+    h.enemies = [];
+    run(h, 2);
+    expect(h.phase).toBe("draft");
+    h.update(STEP, { ...NO_CONTROLS, fire: true, firePressed: true, tap: centre(1), point: centre(1) });
+    run(h, 0.6, { fire: true, point: centre(1) });
+    h.update(STEP, { ...NO_CONTROLS, lift: centre(1) });
+    expect(h.phase).toBe("draft");
+  });
+});

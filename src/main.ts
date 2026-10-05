@@ -64,12 +64,19 @@ input.onAnyInput = () => sfx.unlock();
 input.bindScreen(canvas);
 document.querySelectorAll<HTMLElement>(".pad").forEach((pad) => input.bindPad(pad));
 const muteBtn = document.getElementById("mute-btn")!;
+const fireBtn = document.querySelector<HTMLElement>(".btn-fire")!;
 const renderer = new Renderer(canvas);
 
 /** Shows the on-screen buttons only while the player is using touch. */
 function syncTouchUi(): void {
   document.body.classList.toggle("touch", input.touchMode);
   muteBtn.classList.toggle("muted", sfx.muted);
+  // The big button takes a card between waves and confirms letters when entering initials.
+  const label = game.phase === "draft" ? "TAKE" : game.phase === "entry" ? "NEXT" : "FIRE";
+  if (fireBtn.textContent !== label) {
+    fireBtn.textContent = label;
+    fireBtn.setAttribute("aria-label", label === "FIRE" ? "Fire" : label === "TAKE" ? "Take the highlighted card" : "Next letter");
+  }
 }
 
 // Leaving the tab mid-game pauses it instead of letting the player die off screen.
@@ -81,7 +88,8 @@ window.addEventListener("blur", () => game.pause());
 let last = performance.now();
 let acc = 0;
 
-function frame(now: number): void {
+/** One pass of the loop: read input, advance the game in fixed steps, draw. */
+function tick(now: number): void {
   acc += Math.min(0.1, (now - last) / 1000);
   last = now;
 
@@ -106,6 +114,10 @@ function frame(now: number): void {
   syncTouchUi();
   renderer.resize();
   renderer.draw(game, sfx.muted, input.touchMode);
+}
+
+function frame(now: number): void {
+  tick(now);
   requestAnimationFrame(frame);
 }
 
@@ -119,6 +131,8 @@ Promise.race([document.fonts.load('1rem "Press Start 2P"'), new Promise((r) => s
 if (import.meta.env.DEV) {
   Object.assign(window, {
     __game: game,
+    /** Runs one real loop pass `ms` after the last, input handling included. */
+    __tick: (ms = 1000 / 60) => tick(last + ms),
     __draw: () => {
       renderer.resize();
       renderer.draw(game, sfx.muted, input.touchMode);

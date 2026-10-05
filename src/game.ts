@@ -1,6 +1,7 @@
 import { overlaps } from "./collision";
 import {
   BULLET_DAMAGE,
+  CARD_GAP,
   CARD_H,
   CARD_W,
   CARD_Y,
@@ -99,6 +100,10 @@ export interface Controls {
   typed: string;
   /** Where the screen was clicked or tapped this step, on the reference grid. */
   tap: { x: number; y: number } | null;
+  /** Where a click or tap was let go this step. */
+  lift: { x: number; y: number } | null;
+  /** The mouse over the screen, or a finger held on it (held state, not a one-step press). */
+  point: { x: number; y: number } | null;
 }
 
 export const NO_CONTROLS: Controls = {
@@ -116,6 +121,8 @@ export const NO_CONTROLS: Controls = {
   back: false,
   typed: "",
   tap: null,
+  lift: null,
+  point: null,
 };
 
 /** Clears the one-step parts of a controls snapshot once a step has seen them. */
@@ -124,6 +131,7 @@ export function releasePresses(c: Controls): void {
   c.start = c.pause = c.quit = c.back = false;
   c.typed = "";
   c.tap = null;
+  c.lift = null;
 }
 
 export interface Player {
@@ -340,8 +348,11 @@ export class Game {
 
   /** Upgrade levels picked this run. */
   perks: PerkLevels = {};
-  /** The three cards on offer between waves, which one is highlighted, and whether it is a boss reward. */
-  draft: { cards: CardId[]; sel: number; bonus: boolean } | null = null;
+  /**
+   * The three cards on offer between waves, which one is highlighted, which one a finger or mouse
+   * is pressing (-1 for none), and whether it is a boss reward.
+   */
+  draft: { cards: CardId[]; sel: number; press: number; bonus: boolean } | null = null;
   /** The boss on every 10th wave. */
   boss: Boss | null = null;
   /** Name of the last boss beaten, for the reward draft's header. */
@@ -590,7 +601,7 @@ export class Game {
 
   private openDraft(): void {
     const bonus = this.bossBeaten !== "";
-    this.draft = { cards: dealCards(this.perks, this.rng, 3, bonus), sel: 1, bonus };
+    this.draft = { cards: dealCards(this.perks, this.rng, 3, bonus), sel: 1, press: -1, bonus };
     this.banner = null;
     this.setPhase("draft");
     this.emit("draft");
@@ -598,7 +609,34 @@ export class Game {
 
   private updateDraft(c: Controls): void {
     const d = this.draft;
-    if (!d || this.phaseT < MENU_ARM) return;
+    if (!d) return;
+    // Presses that start before the cards are armed never count, even if let go later.
+    if (this.phaseT < MENU_ARM) {
+      d.press = -1;
+      return;
+    }
+
+    // Clicks and taps work like buttons: press a card to highlight it, slide to another if you
+    // like, and let go on a card to take it. Letting go anywhere else cancels.
+    if (c.tap) d.press = this.cardAt(c.tap.x, c.tap.y);
+    if (c.point) {
+      const over = this.cardAt(c.point.x, c.point.y);
+      if (over >= 0 && over !== d.sel) {
+        d.sel = over;
+        this.emit("select");
+      }
+      if (d.press >= 0 && over >= 0) d.press = over;
+    }
+    if (c.lift) {
+      const over = this.cardAt(c.lift.x, c.lift.y);
+      const take = d.press >= 0 && over >= 0 ? over : -1;
+      d.press = -1;
+      if (take >= 0) {
+        this.takeCard(d.cards[take]);
+        return;
+      }
+    }
+
     if (c.leftPressed) {
       d.sel = (d.sel + 2) % 3;
       this.emit("select");
@@ -609,15 +647,20 @@ export class Game {
 
     let pick = -1;
     if (c.typed >= "1" && c.typed <= "3") pick = Number(c.typed) - 1;
-    else if (c.tap) pick = this.cardAt(c.tap.x, c.tap.y);
-    else if (c.firePressed || c.start) pick = d.sel;
+    // Fire from the keyboard or the on-screen button takes the highlighted card (a press on the
+    // screen itself is handled above, on release).
+    else if ((c.firePressed && !c.tap) || c.start) pick = d.sel;
     if (pick >= 0) this.takeCard(d.cards[pick]);
   }
 
-  /** Which card (0 to 2) is under a point on the reference grid, or -1. */
+  /**
+   * Which card (0 to 2) is under a point on the reference grid, or -1. The touch area reaches a
+   * little past each card, so a thumb does not have to be precise.
+   */
   cardAt(x: number, y: number): number {
-    if (y < CARD_Y || y > CARD_Y + CARD_H) return -1;
-    for (let i = 0; i < 3; i++) if (x >= cardX(i) && x <= cardX(i) + CARD_W) return i;
+    if (y < CARD_Y - 10 || y > CARD_Y + CARD_H + 10) return -1;
+    const half = CARD_GAP / 2;
+    for (let i = 0; i < 3; i++) if (x >= cardX(i) - half && x <= cardX(i) + CARD_W + half) return i;
     return -1;
   }
 

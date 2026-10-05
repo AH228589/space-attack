@@ -37,7 +37,11 @@ game, high scores included, works offline.
 
 On phones and tablets, on-screen buttons appear as soon as you touch the screen: left and right
 under your left thumb, a big FIRE button under your right, plus pause and sound. Tapping the game
-screen also fires, starts, resumes and picks cards. Upright, the buttons sit below the game; sideways, they flank it.
+screen also fires, starts and resumes. Upright, the buttons sit below the game; sideways, they flank it.
+
+Upgrade cards work like buttons on any pointer: touch or click a card to highlight it, slide to another
+if you change your mind, and lift on a card to take it (lifting anywhere else cancels). On phones the
+FIRE button turns into TAKE while cards are up, and into NEXT while entering initials.
 
 ## What is in it
 
