@@ -53,3 +53,14 @@ export const COLORS = {
   orange: "#ff8a1f",
   white: "#ffffff",
 } as const;
+
+/** Upgrade cards shown between waves (shared by the renderer and the click hit test). */
+export const CARD_W = 74;
+export const CARD_H = 112;
+export const CARD_Y = 82;
+export const CARD_GAP = 8;
+export const cardX = (i: number) => (VIEW_W - (3 * CARD_W + 2 * CARD_GAP)) / 2 + i * (CARD_W + CARD_GAP);
+
+/** Energy cells dropped by destroyed enemies. */
+export const DROP_ENERGY = 20;
+export const DROP_SPEED = 38;

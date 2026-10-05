@@ -80,6 +80,25 @@ export class Sfx {
         this.tone("square", 660, 660, 0.05, 0.04);
         this.tone("square", 440, 440, 0.05, 0.04, 0.07);
         break;
+      case "pickup":
+        [880, 1320, 1760].forEach((f, i) => this.tone("square", f, f, 0.05, 0.05, i * 0.05));
+        break;
+      case "shieldBreak":
+        this.tone("sine", 1800, 300, 0.3, 0.08);
+        this.noise(0.15, 0.08, 4000, 800);
+        break;
+      case "draft":
+        [523, 784, 1047, 1568].forEach((f, i) => this.tone("triangle", f, f, 0.12, 0.06, i * 0.07));
+        break;
+      case "select":
+        this.tone("square", 990, 990, 0.035, 0.04);
+        break;
+      case "confirm":
+        this.tone("square", 1320, 1760, 0.08, 0.05);
+        break;
+      case "submit":
+        [784, 988, 1175, 1568, 1175, 1568].forEach((f, i) => this.tone("square", f, f, 0.08, 0.05, i * 0.08));
+        break;
     }
   }
 

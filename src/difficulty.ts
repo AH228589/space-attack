@@ -19,6 +19,7 @@ export interface WaveConfig {
   /** Chance a diving flagship brings hornet escorts. */
   escortChance: number;
   flagshipHp: number;
+  hornetHp: number;
 }
 
 /** Points for a kill: [sitting in formation, in flight]. */
@@ -53,6 +54,7 @@ export function waveConfig(wave: number): WaveConfig {
     formationFireInterval: n < 2 ? Infinity : Math.max(0.55, 3 - 0.35 * (n - 2)),
     escortChance: n < 2 ? 0 : Math.min(0.3 + 0.1 * k, 0.8),
     flagshipHp: n >= 3 ? 2 : 1,
+    hornetHp: 1,
   };
 }
 
@@ -72,4 +74,57 @@ const TAGLINES = [
 /** One line under the wave banner telling the player what just got harder. */
 export function waveTagline(wave: number): string {
   return TAGLINES[wave - 1] ?? "DIFFICULTY UP";
+}
+
+/**
+ * From wave 3 every wave rolls a random anomaly, a twist that changes how that one wave plays.
+ * Most make it harder; a couple are windfalls.
+ */
+export type AnomalyId = "storm" | "armored" | "swarm" | "hyper" | "kamikaze" | "bounty" | "supply";
+
+export const ANOMALIES: Record<AnomalyId, { name: string; desc: string; good: boolean }> = {
+  storm: { name: "BULLET STORM", desc: "THEY FIRE FAR MORE OFTEN", good: false },
+  armored: { name: "ARMORED HORNETS", desc: "HORNETS TAKE TWO HITS", good: false },
+  swarm: { name: "SWARM", desc: "MORE OF THEM DIVE AT ONCE", good: false },
+  hyper: { name: "HYPERSPEED", desc: "EVERYTHING MOVES FASTER", good: false },
+  kamikaze: { name: "KAMIKAZE", desc: "THEY RAM INSTEAD OF SHOOTING", good: false },
+  bounty: { name: "BOUNTY WAVE", desc: "EVERY KILL SCORES DOUBLE", good: true },
+  supply: { name: "SUPPLY RUN", desc: "KILLS DROP MORE ENERGY", good: true },
+};
+
+const ANOMALY_IDS = Object.keys(ANOMALIES) as AnomalyId[];
+
+export function rollAnomaly(wave: number, rng: () => number, previous: AnomalyId | null = null): AnomalyId | null {
+  if (wave < 3) return null;
+  const options = ANOMALY_IDS.filter((id) => id !== previous);
+  return options[Math.floor(rng() * options.length)];
+}
+
+export function applyAnomaly(cfg: WaveConfig, id: AnomalyId | null): WaveConfig {
+  const c = { ...cfg };
+  switch (id) {
+    case "storm":
+      c.shotsPerDive += 2;
+      c.formationFireInterval = Math.min(c.formationFireInterval, 3) * 0.55;
+      break;
+    case "armored":
+      c.hornetHp = 2;
+      break;
+    case "swarm":
+      c.maxDivers += 2;
+      c.diveInterval *= 0.7;
+      break;
+    case "hyper":
+      c.diveSpeed *= 1.25;
+      c.bulletSpeed *= 1.15;
+      c.swaySpeed *= 1.3;
+      break;
+    case "kamikaze":
+      c.shotsPerDive = 0;
+      c.formationFireInterval = Infinity;
+      c.diveSpeed *= 1.35;
+      c.maxDivers += 1;
+      break;
+  }
+  return c;
 }

@@ -1,12 +1,18 @@
+import { VIEW_H, VIEW_W } from "./config";
 import type { Controls } from "./game";
 
-type Action = "left" | "right" | "fire" | "start" | "pause" | "quit" | "mute";
+type Action = "left" | "right" | "up" | "down" | "fire" | "start" | "pause" | "quit" | "back" | "mute";
 
 const BINDINGS: Record<string, Action> = {
   ArrowLeft: "left",
   KeyA: "left",
   ArrowRight: "right",
   KeyD: "right",
+  ArrowUp: "up",
+  KeyW: "up",
+  ArrowDown: "down",
+  KeyS: "down",
+  Backspace: "back",
   Space: "fire",
   KeyZ: "fire",
   KeyJ: "fire",
@@ -43,12 +49,20 @@ export class Input {
   private keys = new Set<Action>();
   private pointers = new Map<number, Action | null>();
   private pressed = new Set<Action>();
+  /** Last letter or digit typed (for entering initials and picking cards with 1 to 3). */
+  private typed = "";
+  /** Where the game screen was last pressed, on the reference grid. */
+  private tap: { x: number; y: number } | null = null;
   private buttons: HTMLElement[] = [];
 
   constructor(target: Window) {
     this.touchMode = target.matchMedia("(pointer: coarse)").matches;
     target.addEventListener("keydown", (ev) => {
       this.onAnyInput();
+      if (!ev.repeat && !ev.ctrlKey && !ev.metaKey && !ev.altKey && /^[a-z0-9]$/i.test(ev.key)) {
+        this.typed = ev.key.toUpperCase();
+        this.touchMode = false;
+      }
       const action = BINDINGS[ev.code];
       if (!action) return;
       this.touchMode = false;
@@ -75,6 +89,8 @@ export class Input {
       ev.preventDefault();
       this.notePointer(ev);
       capture(el, ev.pointerId);
+      const r = el.getBoundingClientRect();
+      this.tap = { x: ((ev.clientX - r.left) / r.width) * VIEW_W, y: ((ev.clientY - r.top) / r.height) * VIEW_H };
       this.hold(ev.pointerId, "fire");
     });
     const release = (ev: PointerEvent) => {
@@ -123,9 +139,16 @@ export class Input {
       right: this.isHeld("right"),
       fire: this.isHeld("fire"),
       firePressed: this.pressed.has("fire"),
+      leftPressed: this.pressed.has("left"),
+      rightPressed: this.pressed.has("right"),
+      upPressed: this.pressed.has("up"),
+      downPressed: this.pressed.has("down"),
       start: this.pressed.has("start"),
       pause: this.pressed.has("pause"),
       quit: this.pressed.has("quit"),
+      back: this.pressed.has("back"),
+      typed: this.typed,
+      tap: this.tap,
     };
   }
 
@@ -136,6 +159,8 @@ export class Input {
 
   clearPressed(): void {
     this.pressed.clear();
+    this.typed = "";
+    this.tap = null;
   }
 
   private notePointer(ev: PointerEvent): void {

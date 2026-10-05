@@ -1,7 +1,12 @@
 import { overlaps } from "./collision";
 import {
   BULLET_DAMAGE,
+  CARD_H,
+  CARD_W,
+  CARD_Y,
   COL_GAP,
+  DROP_ENERGY,
+  DROP_SPEED,
   ENTER_TIME,
   EXTRA_LIFE_EVERY,
   FIRE_COOLDOWN,
@@ -29,11 +34,25 @@ import {
   VIEW_W,
   WAVE_CLEAR_REFILL,
   WAVE_GRACE,
+  cardX,
 } from "./config";
-import { SCORES, enemyCount, waveConfig, waveTagline, type EnemyKind, type WaveConfig } from "./difficulty";
+import {
+  ANOMALIES,
+  SCORES,
+  applyAnomaly,
+  rollAnomaly,
+  waveConfig,
+  waveTagline,
+  type AnomalyId,
+  type EnemyKind,
+  type WaveConfig,
+} from "./difficulty";
+import { NAME_CHARS, placeFor, qualifies, sortEntries, type ScoreEntry } from "./leaderboard";
+import { dealCards, type CardId, type PerkId, type PerkLevels } from "./perks";
 
-export type Phase = "title" | "playing" | "paused" | "gameover";
+export type Phase = "title" | "playing" | "draft" | "paused" | "gameover" | "entry" | "results";
 export type EnemyState = "entering" | "formation" | "peel" | "attack" | "returning";
+export type BoardStatus = "loading" | "online" | "offline";
 
 export type GameEvent =
   | "shoot"
@@ -43,22 +62,37 @@ export type GameEvent =
   | "dive"
   | "playerHit"
   | "playerDie"
+  | "shieldBreak"
+  | "pickup"
   | "waveStart"
   | "waveClear"
+  | "draft"
+  | "select"
+  | "confirm"
   | "extraLife"
   | "gameOver"
+  | "submit"
   | "beat"
   | "pause";
 
-/** What the player is doing this step. `*Pressed` fields are true only on the step the key went down. */
+/** What the player is doing this step. `*Pressed`, `typed` and `tap` only last for the step a press happened. */
 export interface Controls {
   left: boolean;
   right: boolean;
   fire: boolean;
   firePressed: boolean;
+  leftPressed: boolean;
+  rightPressed: boolean;
+  upPressed: boolean;
+  downPressed: boolean;
   start: boolean;
   pause: boolean;
   quit: boolean;
+  back: boolean;
+  /** A letter or digit typed this step, or "". */
+  typed: string;
+  /** Where the screen was clicked or tapped this step, on the reference grid. */
+  tap: { x: number; y: number } | null;
 }
 
 export const NO_CONTROLS: Controls = {
@@ -66,10 +100,25 @@ export const NO_CONTROLS: Controls = {
   right: false,
   fire: false,
   firePressed: false,
+  leftPressed: false,
+  rightPressed: false,
+  upPressed: false,
+  downPressed: false,
   start: false,
   pause: false,
   quit: false,
+  back: false,
+  typed: "",
+  tap: null,
 };
+
+/** Clears the one-step parts of a controls snapshot once a step has seen them. */
+export function releasePresses(c: Controls): void {
+  c.firePressed = c.leftPressed = c.rightPressed = c.upPressed = c.downPressed = false;
+  c.start = c.pause = c.quit = c.back = false;
+  c.typed = "";
+  c.tap = null;
+}
 
 export interface Player {
   x: number;
@@ -123,6 +172,18 @@ export interface Bullet {
   hw: number;
   hh: number;
   dead: boolean;
+  /** Player shots: enemies this shot can still pass through, and the last one it hit. */
+  pierce: number;
+  lastHit: number;
+}
+
+export interface Drop {
+  x: number;
+  y: number;
+  hw: number;
+  hh: number;
+  t: number;
+  dead: boolean;
 }
 
 export interface Particle {
@@ -163,6 +224,9 @@ export interface Star {
 export interface Banner {
   text: string;
   sub: string;
+  /** Optional third line, e.g. what a wave anomaly does. */
+  sub2?: string;
+  subColor?: string;
   t: number;
   max: number;
 }
@@ -191,9 +255,15 @@ const approach = (v: number, target: number, step: number) =>
   v < target ? Math.min(target, v + step) : Math.max(target, v - step);
 const easeOutCubic = (u: number) => 1 - Math.pow(1 - u, 3);
 
+/** How long the GAME OVER card stays up before initials or the table. */
+const GAME_OVER_HOLD = 2.4;
+/** Ignore presses for a moment after a menu opens, so a held fire key cannot pick for you. */
+const MENU_ARM = 0.5;
+
 /**
- * The whole simulation. It never touches the DOM, so it runs the same in the browser and in tests;
- * the outside world hears about sounds and milestones through `onEvent`.
+ * The whole simulation. It never touches the DOM or the network, so it runs the same in the
+ * browser and in tests; the outside world hears about sounds and milestones through `onEvent`
+ * and hands the leaderboard in through `setBoard`.
  */
 export class Game {
   phase: Phase = "title";
@@ -204,6 +274,7 @@ export class Game {
 
   wave = 0;
   cfg: WaveConfig = waveConfig(1);
+  anomaly: AnomalyId | null = null;
   waveT = 0;
   waveTotal = 0;
   score = 0;
@@ -213,17 +284,35 @@ export class Game {
   nextLifeAt = EXTRA_LIFE_EVERY;
   stats: Stats = { shots: 0, hits: 0, kills: 0 };
 
+  /** Upgrade levels picked this run. */
+  perks: PerkLevels = {};
+  /** The three cards on offer between waves, and which one is highlighted. */
+  draft: { cards: CardId[]; sel: number } | null = null;
+  /** The SHIELD upgrade's bubble, recharged every wave. */
+  shieldUp = false;
+
+  /** Leaderboard handed in from outside, and where it came from. */
+  board: ScoreEntry[] = [];
+  boardStatus: BoardStatus = "loading";
+  /** Row of the table to highlight (the player's own fresh entry), or -1. */
+  highlight = -1;
+  /** Initials being entered, and the slot being edited. */
+  entry = { letters: ["A", "A", "A"], slot: 0 };
+  /** Last initials used on this device; prefilled next time. */
+  playerName = "AAA";
+
   player: Player = this.freshPlayer();
   enemies: Enemy[] = [];
   bullets: Bullet[] = [];
   enemyBullets: Bullet[] = [];
+  drops: Drop[] = [];
   particles: Particle[] = [];
   bursts: Burst[] = [];
   popups: Popup[] = [];
   stars: Star[] = [];
   banner: Banner | null = null;
 
-  /** Counts down after a wave is cleared; the next wave starts when it runs out. */
+  /** Counts down after a wave is cleared; the upgrade draft opens when it runs out. */
   clearT = -1;
   /** Counts down after the ship is destroyed. */
   respawnT = -1;
@@ -235,6 +324,7 @@ export class Game {
   private diveT = 0;
   private formFireT = 0;
   private beatT = 0;
+  private repeatT = 0;
   private nextId = 1;
   private readonly rng: () => number;
   private readonly emit: (e: GameEvent) => void;
@@ -276,10 +366,25 @@ export class Game {
         this.updateStars(dt);
         this.updateWorld(dt, c);
         break;
+      case "draft":
+        this.updateStars(dt);
+        this.updateEffects(dt);
+        this.updateDraft(c);
+        break;
       case "gameover":
         this.updateStars(dt);
         this.updateWorld(dt, NO_CONTROLS);
-        if (this.phaseT > 1.2 && (c.start || c.firePressed)) this.startGame();
+        if (this.phaseT > GAME_OVER_HOLD || (this.phaseT > 1 && (c.start || c.firePressed))) this.finishRun();
+        break;
+      case "entry":
+        this.updateStars(dt);
+        this.updateWorld(dt, NO_CONTROLS);
+        this.updateEntry(dt, c);
+        break;
+      case "results":
+        this.updateStars(dt);
+        this.updateWorld(dt, NO_CONTROLS);
+        if (this.phaseT > 1 && (c.start || c.firePressed)) this.startGame();
         else if (c.quit || c.pause) this.toTitle();
         break;
     }
@@ -291,10 +396,15 @@ export class Game {
     this.lives = START_LIVES;
     this.nextLifeAt = EXTRA_LIFE_EVERY;
     this.stats = { shots: 0, hits: 0, kills: 0 };
+    this.perks = {};
+    this.draft = null;
+    this.anomaly = null;
+    this.highlight = -1;
     this.player = this.freshPlayer();
     this.enemies = [];
     this.bullets = [];
     this.enemyBullets = [];
+    this.drops = [];
     this.particles = [];
     this.bursts = [];
     this.popups = [];
@@ -316,11 +426,20 @@ export class Game {
     this.enemies = [];
     this.bullets = [];
     this.enemyBullets = [];
+    this.drops = [];
     this.particles = [];
     this.bursts = [];
     this.popups = [];
     this.banner = null;
     this.setPhase("title");
+  }
+
+  /** Hands in the leaderboard (from the server, or this device when offline). */
+  setBoard(board: ScoreEntry[], status: BoardStatus, highlight = -1): void {
+    this.board = board;
+    this.boardStatus = status;
+    this.highlight = highlight;
+    if (board.length) this.hiScore = Math.max(this.hiScore, board[0].score);
   }
 
   private setPhase(p: Phase): void {
@@ -330,14 +449,19 @@ export class Game {
 
   private nextWave(): void {
     this.wave++;
-    this.cfg = waveConfig(this.wave);
+    this.anomaly = rollAnomaly(this.wave, this.rng, this.anomaly);
+    this.cfg = applyAnomaly(waveConfig(this.wave), this.anomaly);
     this.waveT = 0;
     this.clearT = -1;
     this.diveT = WAVE_GRACE;
     this.formFireT = WAVE_GRACE + this.cfg.formationFireInterval;
+    this.shieldUp = this.level("shield") > 0;
     this.spawnFormation();
     this.waveTotal = this.enemies.length;
-    this.banner = { text: `WAVE ${this.wave}`, sub: waveTagline(this.wave), t: 0, max: 2.6 };
+    const a = this.anomaly ? ANOMALIES[this.anomaly] : null;
+    this.banner = a
+      ? { text: `WAVE ${this.wave}`, sub: `ANOMALY: ${a.name}`, sub2: a.desc, subColor: a.good ? "#3ee05a" : "#ff3b3b", t: 0, max: 3.2 }
+      : { text: `WAVE ${this.wave}`, sub: waveTagline(this.wave), t: 0, max: 2.6 };
     this.emit("waveStart");
   }
 
@@ -351,6 +475,23 @@ export class Game {
     this.emit("gameOver");
   }
 
+  /** After the GAME OVER card: initials if the score makes the table, otherwise straight to it. */
+  private finishRun(): void {
+    if (qualifies(this.board, this.score)) {
+      this.entry = { letters: [...this.playerName.padEnd(3, "A").slice(0, 3)], slot: 0 };
+      this.repeatT = 0;
+      this.setPhase("entry");
+    } else {
+      this.highlight = -1;
+      this.setPhase("results");
+    }
+  }
+
+  /** The place the current score would take on the table. */
+  get place(): number {
+    return placeFor(this.board, this.score);
+  }
+
   private freshPlayer(): Player {
     return {
       x: VIEW_W / 2,
@@ -358,12 +499,139 @@ export class Game {
       vx: 0,
       hw: 4.5,
       hh: 3,
-      energy: MAX_ENERGY,
+      energy: this.maxEnergy,
       alive: true,
       invuln: 0,
       cooldown: 0,
       hitFlash: 0,
     };
+  }
+
+  // ---------------------------------------------------------------- upgrades
+
+  level(id: PerkId): number {
+    return this.perks[id] ?? 0;
+  }
+
+  get maxEnergy(): number {
+    return MAX_ENERGY + 25 * this.level("plating");
+  }
+
+  private openDraft(): void {
+    this.draft = { cards: dealCards(this.perks, this.rng), sel: 1 };
+    this.banner = null;
+    this.setPhase("draft");
+    this.emit("draft");
+  }
+
+  private updateDraft(c: Controls): void {
+    const d = this.draft;
+    if (!d || this.phaseT < MENU_ARM) return;
+    if (c.leftPressed) {
+      d.sel = (d.sel + 2) % 3;
+      this.emit("select");
+    } else if (c.rightPressed) {
+      d.sel = (d.sel + 1) % 3;
+      this.emit("select");
+    }
+
+    let pick = -1;
+    if (c.typed >= "1" && c.typed <= "3") pick = Number(c.typed) - 1;
+    else if (c.tap) pick = this.cardAt(c.tap.x, c.tap.y);
+    else if (c.firePressed || c.start) pick = d.sel;
+    if (pick >= 0) this.takeCard(d.cards[pick]);
+  }
+
+  /** Which card (0 to 2) is under a point on the reference grid, or -1. */
+  cardAt(x: number, y: number): number {
+    if (y < CARD_Y || y > CARD_Y + CARD_H) return -1;
+    for (let i = 0; i < 3; i++) if (x >= cardX(i) && x <= cardX(i) + CARD_W) return i;
+    return -1;
+  }
+
+  private takeCard(card: CardId): void {
+    const p = this.player;
+    if (card === "fix") {
+      p.energy = this.maxEnergy;
+    } else {
+      this.perks[card] = this.level(card) + 1;
+      if (card === "plating" && p.alive) p.energy = Math.min(this.maxEnergy, p.energy + 25);
+      if (card === "extra") this.lives = Math.min(MAX_LIVES, this.lives + 1);
+    }
+    this.draft = null;
+    this.emit("confirm");
+    this.setPhase("playing");
+    this.nextWave();
+  }
+
+  // ---------------------------------------------------------------- initials
+
+  private updateEntry(dt: number, c: Controls): void {
+    if (this.phaseT < MENU_ARM) return;
+    const e = this.entry;
+
+    if (c.typed && NAME_CHARS.includes(c.typed)) {
+      e.letters[e.slot] = c.typed;
+      this.advanceEntry();
+      return;
+    }
+    if (c.back) {
+      e.slot = Math.max(0, e.slot - 1);
+      this.emit("select");
+      return;
+    }
+    if (c.pause) {
+      // Esc skips saving the score.
+      this.highlight = -1;
+      this.setPhase("results");
+      return;
+    }
+
+    let dir = 0;
+    if (c.leftPressed || c.downPressed) dir = -1;
+    else if (c.rightPressed || c.upPressed) dir = 1;
+    if (dir) {
+      this.cycleLetter(dir);
+      this.repeatT = 0.4;
+    } else if (c.left !== c.right) {
+      // Holding a direction scrolls through the letters.
+      this.repeatT -= dt;
+      if (this.repeatT <= 0) {
+        this.cycleLetter(c.left ? -1 : 1);
+        this.repeatT = 0.09;
+      }
+    }
+
+    if (c.firePressed || c.start || c.tap) this.advanceEntry();
+  }
+
+  private cycleLetter(dir: number): void {
+    const e = this.entry;
+    const i = NAME_CHARS.indexOf(e.letters[e.slot]);
+    e.letters[e.slot] = NAME_CHARS[(i + dir + NAME_CHARS.length) % NAME_CHARS.length];
+    this.emit("select");
+  }
+
+  private advanceEntry(): void {
+    const e = this.entry;
+    e.slot++;
+    if (e.slot < 3) {
+      this.emit("confirm");
+      return;
+    }
+    e.slot = 2;
+    let name = e.letters.join("");
+    if (!name.trim()) name = "AAA";
+    this.playerName = name;
+    // Show the entry on the table straight away; the server's answer replaces it when it lands.
+    const at = Date.now();
+    const mine = { name, score: this.score, wave: this.wave, at };
+    const merged = sortEntries([...this.board.map((b, i) => ({ ...b, at: i - 1e15 })), mine]);
+    this.highlight = merged.indexOf(mine);
+    this.board = merged.slice(0, 10).map(({ name: n, score, wave }) => ({ name: n, score, wave }));
+    if (this.highlight >= 10) this.highlight = -1;
+    this.setPhase("results");
+    this.emit("submit");
   }
 
   // ---------------------------------------------------------------- world
@@ -381,6 +649,7 @@ export class Game {
     this.updatePlayer(dt, c);
     this.updateEnemies(dt);
     this.updateBullets(dt);
+    this.updateDrops(dt);
     this.collide();
     this.updateEffects(dt);
     this.updateBeat(dt);
@@ -388,18 +657,24 @@ export class Game {
     this.enemies = this.enemies.filter((e) => !e.dead);
     this.bullets = this.bullets.filter((b) => !b.dead);
     this.enemyBullets = this.enemyBullets.filter((b) => !b.dead);
+    this.drops = this.drops.filter((d) => !d.dead);
 
     if (this.phase !== "playing") return;
 
     if (this.enemies.length === 0 && this.clearT < 0) {
-      this.clearT = 2;
-      this.banner = { text: `WAVE ${this.wave} CLEAR`, sub: "ENERGY RECHARGED", t: 0, max: 1.9 };
-      if (this.player.alive) this.player.energy = Math.min(MAX_ENERGY, this.player.energy + WAVE_CLEAR_REFILL);
+      this.clearT = 1.6;
+      this.banner = { text: `WAVE ${this.wave} CLEAR`, sub: "ENERGY RECHARGED", t: 0, max: 1.6 };
+      if (this.player.alive) this.player.energy = Math.min(this.maxEnergy, this.player.energy + WAVE_CLEAR_REFILL);
       this.emit("waveClear");
     }
     if (this.clearT >= 0) {
       this.clearT -= dt;
-      if (this.clearT < 0) this.nextWave();
+      if (this.clearT < 0) {
+        // No upgrade for a run that is already over.
+        if (this.player.alive || this.lives > 0) this.openDraft();
+        else this.nextWave();
+        return;
+      }
     }
 
     if (this.respawnT >= 0) {
@@ -427,19 +702,35 @@ export class Game {
     if (!p.alive) return;
     p.invuln = Math.max(0, p.invuln - dt);
     p.cooldown = Math.max(0, p.cooldown - dt);
+    p.energy = Math.min(this.maxEnergy, p.energy + 2 * this.level("repair") * dt);
 
+    const speed = PLAYER_SPEED * (1 + 0.2 * this.level("thrusters"));
     const dir = (c.right ? 1 : 0) - (c.left ? 1 : 0);
-    p.vx = approach(p.vx, dir * PLAYER_SPEED, PLAYER_ACCEL * dt);
+    p.vx = approach(p.vx, dir * speed, PLAYER_ACCEL * dt);
     p.x += p.vx * dt;
     if (p.x < PLAYER_MIN_X || p.x > PLAYER_MAX_X) {
       p.x = clamp(p.x, PLAYER_MIN_X, PLAYER_MAX_X);
       p.vx = 0;
     }
 
-    if (c.fire && p.cooldown <= 0 && this.bullets.length < MAX_PLAYER_BULLETS) {
-      this.bullets.push({ x: p.x, y: p.y - 6, vx: 0, vy: -PLAYER_BULLET_SPEED, hw: 1, hh: 3, dead: false });
-      p.cooldown = FIRE_COOLDOWN;
-      this.stats.shots++;
+    const twin = this.level("twin");
+    const volley = 1 + twin;
+    const maxBullets = (MAX_PLAYER_BULLETS + this.level("rapid")) * volley;
+    if (c.fire && p.cooldown <= 0 && this.bullets.length + volley <= maxBullets) {
+      const pierce = this.level("pierce");
+      const shot = (x: number, vx: number) =>
+        this.bullets.push({ x, y: p.y - 6, vx, vy: -PLAYER_BULLET_SPEED, hw: 1, hh: 3, dead: false, pierce, lastHit: -1 });
+      if (twin === 0) shot(p.x, 0);
+      else if (twin === 1) {
+        shot(p.x - 3, 0);
+        shot(p.x + 3, 0);
+      } else {
+        shot(p.x, 0);
+        shot(p.x - 3, -38);
+        shot(p.x + 3, 38);
+      }
+      p.cooldown = FIRE_COOLDOWN * Math.pow(0.8, this.level("rapid"));
+      this.stats.shots += volley;
       this.emit("shoot");
     }
   }
@@ -475,7 +766,7 @@ export class Game {
           y: 70 + row * 8,
           hw: 5.5,
           hh: r.kind === "flagship" ? 4.5 : 4,
-          hp: r.kind === "flagship" ? this.cfg.flagshipHp : 1,
+          hp: r.kind === "flagship" ? this.cfg.flagshipHp : r.kind === "hornet" ? this.cfg.hornetHp : 1,
           state: "entering",
           t: 0,
           delay: row * 0.32 + Math.abs(centre) * 0.07,
@@ -645,14 +936,15 @@ export class Game {
     const vy = this.cfg.bulletSpeed;
     const flight = Math.max(0.2, (PLAYER_Y - e.y) / vy);
     const vx = clamp(((this.player.x - e.x) / flight) * lead, -45, 45);
-    this.enemyBullets.push({ x: e.x, y: e.y + 5, vx, vy, hw: 1, hh: 2.5, dead: false });
+    this.enemyBullets.push({ x: e.x, y: e.y + 5, vx, vy, hw: 1, hh: 2.5, dead: false, pierce: 0, lastHit: -1 });
     this.emit("enemyShoot");
   }
 
   private updateBullets(dt: number): void {
     for (const b of this.bullets) {
+      b.x += b.vx * dt;
       b.y += b.vy * dt;
-      if (b.y < 18) b.dead = true;
+      if (b.y < 18 || b.x < -4 || b.x > VIEW_W + 4) b.dead = true;
     }
     for (const b of this.enemyBullets) {
       b.x += b.vx * dt;
@@ -661,19 +953,52 @@ export class Game {
     }
   }
 
+  private updateDrops(dt: number): void {
+    for (const d of this.drops) {
+      d.t += dt;
+      d.y += DROP_SPEED * dt;
+      if (d.y > VIEW_H + 4) d.dead = true;
+    }
+  }
+
   private collide(): void {
     for (const b of this.bullets) {
       if (b.dead) continue;
       for (const e of this.enemies) {
-        if (e.dead || e.y < 0 || !overlaps(b, e)) continue;
-        b.dead = true;
+        if (e.dead || e.y < 0 || e.id === b.lastHit || !overlaps(b, e)) continue;
+        b.lastHit = e.id;
+        if (b.pierce > 0) b.pierce--;
+        else b.dead = true;
         this.hitEnemy(e);
-        break;
+        if (b.dead) break;
+      }
+    }
+
+    if (this.level("deflector")) {
+      for (const b of this.bullets) {
+        if (b.dead) continue;
+        for (const eb of this.enemyBullets) {
+          if (eb.dead || !overlaps({ ...b, hw: 2.5 }, eb)) continue;
+          eb.dead = true;
+          b.dead = true;
+          this.sparks(eb.x, eb.y, "#ffffff", 4);
+          break;
+        }
       }
     }
 
     const p = this.player;
-    if (!p.alive || p.invuln > 0) return;
+    if (!p.alive) return;
+
+    for (const d of this.drops) {
+      if (d.dead || !overlaps(d, p)) continue;
+      d.dead = true;
+      p.energy = Math.min(this.maxEnergy, p.energy + DROP_ENERGY);
+      this.popups.push({ x: p.x, y: p.y - 12, t: 0, text: `+${DROP_ENERGY} ENERGY`, color: "#3ee05a" });
+      this.emit("pickup");
+    }
+
+    if (p.invuln > 0) return;
 
     for (const b of this.enemyBullets) {
       if (b.dead || !overlaps(b, p)) continue;
@@ -707,9 +1032,14 @@ export class Game {
     this.stats.kills++;
     const inFlight = e.state !== "formation" && e.state !== "entering";
     if (award) {
-      const pts = SCORES[e.kind][inFlight ? 1 : 0];
+      const mult = (1 + 0.25 * this.level("bounty")) * (this.anomaly === "bounty" ? 2 : 1);
+      const pts = Math.round((SCORES[e.kind][inFlight ? 1 : 0] * mult) / 10) * 10;
       this.addScore(pts);
-      if (inFlight) this.popups.push({ x: e.x, y: e.y, t: 0, text: String(pts), color: ENEMY_COLORS[e.kind] });
+      if (inFlight || mult > 1) this.popups.push({ x: e.x, y: e.y, t: 0, text: String(pts), color: ENEMY_COLORS[e.kind] });
+
+      const dropChance =
+        (inFlight ? 0.05 : 0.02) + 0.06 * this.level("salvage") + (this.anomaly === "supply" ? 0.12 : 0);
+      if (this.rng() < dropChance) this.drops.push({ x: e.x, y: e.y, hw: 3.5, hh: 3, t: 0, dead: false });
     }
     this.bursts.push({ x: e.x, y: e.y, t: 0, color: ENEMY_COLORS[e.kind], big: e.kind === "flagship" });
     this.sparks(e.x, e.y, ENEMY_COLORS[e.kind], e.kind === "flagship" ? 22 : 12);
@@ -731,6 +1061,15 @@ export class Game {
 
   private damagePlayer(amount: number): void {
     const p = this.player;
+    if (this.shieldUp) {
+      this.shieldUp = false;
+      p.invuln = HIT_INVULN;
+      this.shake = Math.max(this.shake, 2);
+      this.sparks(p.x, p.y, "#2ee6e6", 16);
+      this.popups.push({ x: p.x, y: p.y - 12, t: 0, text: "SHIELD DOWN", color: "#2ee6e6" });
+      this.emit("shieldBreak");
+      return;
+    }
     p.energy = Math.max(0, p.energy - amount);
     p.hitFlash = 0.3;
     this.shake = Math.max(this.shake, 4);
@@ -803,10 +1142,8 @@ export class Game {
   }
 
   get accuracy(): number {
-    return this.stats.shots ? Math.round((100 * this.stats.hits) / this.stats.shots) : 0;
-  }
-
-  get enemyTotal(): number {
-    return enemyCount(this.cfg);
+    // Piercing shots can hit several enemies, so cap it at 100.
+    return this.stats.shots ? Math.min(100, Math.round((100 * this.stats.hits) / this.stats.shots)) : 0;
   }
 }
+

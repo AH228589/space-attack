@@ -1,12 +1,46 @@
-import { COLORS, FIRE_COOLDOWN, MAX_ENERGY, VIEW_H, VIEW_W } from "./config";
-import { SCORES } from "./difficulty";
+import { CARD_H, CARD_W, CARD_Y, COLORS, FIRE_COOLDOWN, VIEW_H, VIEW_W, cardX } from "./config";
+import { ANOMALIES, SCORES } from "./difficulty";
 import { ENEMY_COLORS, type Game } from "./game";
+import { ordinal } from "./leaderboard";
+import { cardDef, describeBuild, type CardId, type Rarity } from "./perks";
 import { SpriteCache, spriteSize, type SpriteName } from "./sprites";
 
 // Canvas fonts need a CSS length, but text is drawn under the screen transform, so the "px" in
 // these font strings are reference-grid cells that scale with the screen, not screen pixels.
 const FONT = '"Press Start 2P", monospace';
 const pad = (n: number, len: number) => String(n).padStart(len, "0");
+
+const RARITY_COLOR: Record<Rarity, string> = { common: "#3ee05a", rare: "#2ee6e6", epic: "#ffd23a" };
+/** A big symbol for each card, in the arcade font. */
+const CARD_GLYPH: Record<CardId, string> = {
+  twin: "||",
+  rapid: ">>",
+  pierce: "->",
+  plating: "[]",
+  repair: "+",
+  thrusters: "<>",
+  bounty: "$",
+  deflector: "X",
+  salvage: "E",
+  shield: "()",
+  extra: "1UP",
+  fix: "+E",
+};
+const PODIUM = ["#ffd23a", "#d8deff", "#ff9a52"];
+
+/** Breaks text into lines of at most `max` characters, at spaces. */
+function wrap(text: string, max: number): string[] {
+  const lines: string[] = [];
+  let line = "";
+  for (const word of text.split(" ")) {
+    if (line && line.length + 1 + word.length > max) {
+      lines.push(line);
+      line = word;
+    } else line = line ? `${line} ${word}` : word;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
 
 /**
  * Draws the game. All coordinates are on the VIEW_W x VIEW_H reference grid; the canvas
@@ -72,14 +106,17 @@ export class Renderer {
 
     this.drawTopHud(g);
     this.drawBottomHud(g);
-    if (g.phase !== "paused") this.drawBanner(g);
+    if (g.phase === "playing") this.drawBanner(g);
     if (g.hintT > 0 && g.phase === "playing") {
       ctx.globalAlpha = Math.min(1, g.hintT);
       this.drawControlsHint(206);
       ctx.globalAlpha = 1;
     }
-    if (g.phase === "paused") this.drawPause();
+    if (g.phase === "paused") this.drawPause(g);
     if (g.phase === "gameover") this.drawGameOver(g);
+    if (g.phase === "draft") this.drawDraft(g);
+    if (g.phase === "entry") this.drawEntry(g);
+    if (g.phase === "results") this.drawResults(g);
     this.drawMute(muted);
   }
 
@@ -115,7 +152,23 @@ export class Renderer {
       this.rect(b.x - 0.75, b.y - 2.5, 1.5, 5, flicker ? COLORS.white : "#ff8a8a");
     }
 
+    for (const d of g.drops) {
+      const blink = Math.floor(d.t * 8) % 2 === 0;
+      this.rect(d.x - 3.5, d.y - 2.5, 7, 5, COLORS.green);
+      this.rect(d.x - 0.5, d.y - 1.5, 1, 3, blink ? COLORS.white : "#0b3d16");
+      this.rect(d.x - 1.5, d.y - 0.5, 3, 1, blink ? COLORS.white : "#0b3d16");
+    }
+
     const p = g.player;
+    if (p.alive && g.shieldUp) {
+      ctx.globalAlpha = 0.45 + 0.25 * Math.sin(g.time * 6);
+      ctx.strokeStyle = COLORS.cyan;
+      ctx.lineWidth = 0.75;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 9.5, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
     if (p.alive && (p.invuln <= 0 || Math.floor(g.time * 16) % 2 === 0)) {
       const flame = 1 + Math.floor((g.time * 30) % 3);
       this.rect(p.x - 2.5, p.y + 4, 1, flame, COLORS.orange);
@@ -158,6 +211,10 @@ export class Renderer {
     this.text(pad(g.score, 6), 58, 13, 8, COLORS.score);
     this.text("HI-SCORE", 194, 4, 6, COLORS.label);
     this.text(pad(Math.max(g.hiScore, g.score), 6), 194, 13, 8, COLORS.score);
+    if (g.anomaly && (g.phase === "playing" || g.phase === "paused")) {
+      const a = ANOMALIES[g.anomaly];
+      this.text(a.name, VIEW_W / 2, 24, 5, a.good ? COLORS.green : COLORS.red);
+    }
   }
 
   private drawBottomHud(g: Game): void {
@@ -165,7 +222,7 @@ export class Renderer {
     const y = 270;
     this.text("E", 8, y, 8, COLORS.label, "left");
 
-    const frac = p.alive ? p.energy / MAX_ENERGY : 0;
+    const frac = p.alive ? p.energy / g.maxEnergy : 0;
     const low = frac <= 0.34;
     this.rect(18, y, 74, 8, "#16241a");
     if (frac > 0 && (!low || Math.floor(g.time * 6) % 2 === 0)) {
@@ -185,12 +242,13 @@ export class Renderer {
     if (!b) return;
     this.ctx.globalAlpha = Math.max(0, Math.min(1, b.t / 0.2, (b.max - b.t) / 0.35));
     this.text(b.text, VIEW_W / 2, 136, 12, COLORS.cyan);
-    this.text(b.sub, VIEW_W / 2, 156, 6, COLORS.yellow);
+    this.text(b.sub, VIEW_W / 2, 156, 6, b.subColor ?? COLORS.yellow);
+    if (b.sub2) this.text(b.sub2, VIEW_W / 2, 167, 5, COLORS.text);
     this.ctx.globalAlpha = 1;
   }
 
   private drawMute(muted: boolean): void {
-    if (muted) this.text(this.touch ? "SOUND OFF" : "SOUND OFF (M)", VIEW_W / 2, 24, 5, COLORS.dim);
+    if (muted) this.text(this.touch ? "SOUND OFF" : "SOUND OFF (M)", VIEW_W / 2, 259, 4, COLORS.dim);
   }
 
   // ---------------------------------------------------------------- screens
@@ -201,32 +259,39 @@ export class Renderer {
     this.logo("SPACE", 40 + bob, 24);
     this.logo("ATTACK", 68 + bob, 24);
 
-    this.text("FORMATION", 150, 104, 5, COLORS.dim);
-    this.text("DIVING", 212, 104, 5, COLORS.dim);
-    const kinds = ["flagship", "hornet", "drone"] as const;
-    const flap = Math.floor(g.time * 2.2) % 2;
-    kinds.forEach((k, i) => {
-      const y = 120 + i * 15;
-      this.sprite(k, flap, 70, y);
-      this.text(String(SCORES[k][0]), 150, y - 4, 8, ENEMY_COLORS[k]);
-      this.text(String(SCORES[k][1]), 212, y - 4, 8, ENEMY_COLORS[k]);
-    });
-
-    this.drawControlsPanel(170);
+    // Attract mode: the instructions and the high score table take turns, as in an arcade.
+    const showTable = Math.floor(g.phaseT / 8) % 2 === 1;
+    if (showTable) {
+      this.text("HIGH SCORES", VIEW_W / 2, 104, 8, COLORS.cyan);
+      this.drawBoardRows(g, 120, 11);
+    } else {
+      this.text("FORMATION", 150, 104, 5, COLORS.dim);
+      this.text("DIVING", 212, 104, 5, COLORS.dim);
+      const kinds = ["flagship", "hornet", "drone"] as const;
+      const flap = Math.floor(g.time * 2.2) % 2;
+      kinds.forEach((k, i) => {
+        const y = 120 + i * 15;
+        this.sprite(k, flap, 70, y);
+        this.text(String(SCORES[k][0]), 150, y - 4, 8, ENEMY_COLORS[k]);
+        this.text(String(SCORES[k][1]), 212, y - 4, 8, ENEMY_COLORS[k]);
+      });
+      this.drawControlsPanel(170);
+    }
 
     const prompt = this.touch ? "TAP TO START" : "ENTER OR CLICK TO START";
     if (Math.floor(g.time * 2) % 2 === 0) this.text(prompt, VIEW_W / 2, 238, 8, COLORS.yellow);
     this.text("EXTRA SHIP EVERY 10000 PTS", VIEW_W / 2, 256, 5, COLORS.dim);
-    this.text("SURVIVE THE WAVES. THEY ONLY GET FASTER.", VIEW_W / 2, 268, 4, COLORS.dim);
+    this.text("PICK AN UPGRADE AFTER EVERY WAVE", VIEW_W / 2, 268, 4, COLORS.dim);
     ctx.globalAlpha = 1;
   }
 
-  private drawPause(): void {
+  private drawPause(g: Game): void {
     this.dim(0.65);
-    this.text("PAUSED", VIEW_W / 2, 92, 16, COLORS.cyan);
-    this.drawControlsPanel(128);
-    this.text(this.touch ? "TAP TO RESUME" : "P, ENTER OR CLICK TO RESUME", VIEW_W / 2, 196, 6, COLORS.yellow);
-    if (!this.touch) this.text("Q TO QUIT TO TITLE", VIEW_W / 2, 210, 6, COLORS.dim);
+    this.text("PAUSED", VIEW_W / 2, 84, 16, COLORS.cyan);
+    this.drawControlsPanel(116);
+    this.text(this.touch ? "TAP TO RESUME" : "P, ENTER OR CLICK TO RESUME", VIEW_W / 2, 184, 6, COLORS.yellow);
+    if (!this.touch) this.text("Q TO QUIT TO TITLE", VIEW_W / 2, 198, 6, COLORS.dim);
+    this.drawBuild(g, 218);
   }
 
   private drawGameOver(g: Game): void {
@@ -246,11 +311,156 @@ export class Renderer {
       this.text(value, 204, y, 6, COLORS.score, "right");
     });
 
-    if (g.phaseT > 1.2) {
-      const again = this.touch ? "TAP TO PLAY AGAIN" : "ENTER OR CLICK TO PLAY AGAIN";
-      if (Math.floor(g.time * 2) % 2 === 0) this.text(again, VIEW_W / 2, 196, 7, COLORS.yellow);
-      this.text(this.touch ? "PAUSE BUTTON FOR TITLE" : "ESC FOR TITLE SCREEN", VIEW_W / 2, 212, 6, COLORS.dim);
+    if (g.phaseT > 1 && Math.floor(g.time * 2) % 2 === 0) {
+      this.text(this.touch ? "TAP TO CONTINUE" : "PRESS ENTER TO CONTINUE", VIEW_W / 2, 196, 6, COLORS.yellow);
     }
+  }
+
+  /** Between waves: three upgrade cards to choose from. */
+  private drawDraft(g: Game): void {
+    const d = g.draft;
+    if (!d) return;
+    this.dim(0.6);
+    this.text(`WAVE ${g.wave} CLEAR`, VIEW_W / 2, 38, 10, COLORS.cyan);
+    this.text("CHOOSE AN UPGRADE", VIEW_W / 2, 58, 7, COLORS.yellow);
+    d.cards.forEach((id, i) => this.drawCard(g, id, i, i === d.sel));
+
+    if (this.touch) {
+      this.text("TAP A CARD TO TAKE IT", VIEW_W / 2, 206, 6, COLORS.text);
+    } else {
+      const y = 204;
+      this.key("LEFT", 58, y);
+      this.key("RIGHT", 71, y);
+      this.text("CHOOSE", 86, y + 3, 5, COLORS.text, "left");
+      this.key("SPACE", 128, y, 34);
+      this.text("TAKE", 166, y + 3, 5, COLORS.text, "left");
+      this.text("OR CLICK A CARD, OR PRESS 1, 2 OR 3", VIEW_W / 2, y + 16, 4, COLORS.dim);
+    }
+    this.drawBuild(g, 236);
+  }
+
+  private drawCard(g: Game, id: CardId, i: number, selected: boolean): void {
+    const { ctx } = this;
+    const def = cardDef(id);
+    const color = RARITY_COLOR[def.rarity];
+    const x = cardX(i);
+    const y = CARD_Y + (selected ? -3 : 0);
+    const cx = x + CARD_W / 2;
+
+    ctx.fillStyle = selected ? "#18205a" : "#0d1130";
+    ctx.strokeStyle = color;
+    ctx.lineWidth = selected ? 1.5 : 0.6;
+    ctx.globalAlpha = selected ? 1 : 0.85;
+    ctx.beginPath();
+    ctx.roundRect(x, y, CARD_W, CARD_H, 4);
+    ctx.fill();
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    this.text(def.rarity.toUpperCase(), cx, y + 7, 4, color);
+    this.text(CARD_GLYPH[id], cx, y + 20, 14, color);
+    this.text(def.name, cx, y + 44, def.name.length > 10 ? 5 : 6, COLORS.white);
+    this.text(def.desc[0], cx, y + 60, 4, "#c3c9ec");
+    this.text(def.desc[1], cx, y + 68, 4, "#c3c9ec");
+
+    if (id !== "fix" && def.max > 1) {
+      // One pip per level: owned levels filled, the level this card adds blinking.
+      const have = g.level(id);
+      const pipW = 6;
+      const startX = cx - (def.max * pipW + (def.max - 1) * 3) / 2;
+      for (let k = 0; k < def.max; k++) {
+        const px = startX + k * (pipW + 3);
+        const next = k === have && Math.floor(g.time * 4) % 2 === 0;
+        this.rect(px, y + 84, pipW, 3, k < have ? color : next ? COLORS.white : "#2a3166");
+      }
+    }
+    if (!this.touch) this.text(String(i + 1), cx, y + CARD_H - 13, 5, selected ? COLORS.yellow : COLORS.dim);
+  }
+
+  /** Arcade initials: three letters, picked one at a time. */
+  private drawEntry(g: Game): void {
+    this.dim(0.88);
+    if (Math.floor(g.time * 3) % 3 !== 0) this.text("NEW HIGH SCORE!", VIEW_W / 2, 38, 10, COLORS.yellow);
+    this.text(`YOU PLACED ${ordinal(g.place)}`, VIEW_W / 2, 56, 7, COLORS.cyan);
+    this.text(`SCORE ${g.score}`, VIEW_W / 2, 70, 6, COLORS.text);
+    this.text("ENTER YOUR INITIALS", VIEW_W / 2, 92, 7, COLORS.white);
+
+    const { letters, slot } = g.entry;
+    letters.forEach((ch, i) => {
+      const x = VIEW_W / 2 + (i - 1) * 26;
+      const current = i === slot;
+      const color = current ? COLORS.yellow : i < slot ? COLORS.white : COLORS.dim;
+      if (!current || Math.floor(g.time * 4) % 4 !== 0) this.text(ch === " " ? "_" : ch, x + 1, 112, 18, color);
+      this.rect(x - 9, 134, 20, 1.5, current ? COLORS.yellow : "#2a3166");
+      if (current) {
+        this.triangle(x + 1, 106, -1);
+        this.triangle(x + 1, 141, 1);
+      }
+    });
+
+    if (this.touch) {
+      this.key("LEFT", 66, 156);
+      this.key("RIGHT", 79, 156);
+      this.text("CHANGE LETTER", 94, 159, 5, COLORS.text, "left");
+      this.text("FIRE OR TAP FOR THE NEXT ONE", VIEW_W / 2, 174, 5, COLORS.text);
+    } else {
+      this.text("TYPE THEM, OR USE THE ARROWS", VIEW_W / 2, 154, 5, COLORS.text);
+      this.text("ENTER OR SPACE: NEXT LETTER", VIEW_W / 2, 166, 5, COLORS.text);
+      this.text("BACKSPACE: BACK    ESC: SKIP", VIEW_W / 2, 178, 5, COLORS.dim);
+    }
+  }
+
+  /** End of a run: summary, the shared top 10 (your entry highlighted) and the build you made. */
+  private drawResults(g: Game): void {
+    this.dim(0.88);
+    this.text("GAME OVER", VIEW_W / 2, 30, 10, COLORS.red);
+    this.text(`SCORE ${g.score}   WAVE ${g.wave}`, VIEW_W / 2, 46, 5, COLORS.yellow);
+    this.text(`KILLS ${g.stats.kills}   ACCURACY ${g.accuracy}%`, VIEW_W / 2, 55, 5, COLORS.text);
+
+    const title =
+      g.boardStatus === "online" ? "GLOBAL TOP 10" : g.boardStatus === "offline" ? "TOP 10 ON THIS DEVICE" : "LOADING SCORES...";
+    this.text(title, VIEW_W / 2, 68, 6, g.boardStatus === "offline" ? COLORS.orange : COLORS.cyan);
+    this.drawBoardRows(g, 82, 10);
+
+    this.drawBuild(g, 192);
+    if (g.phaseT > 1) {
+      const again = this.touch ? "TAP TO PLAY AGAIN" : "ENTER OR CLICK TO PLAY AGAIN";
+      if (Math.floor(g.time * 2) % 2 === 0) this.text(again, VIEW_W / 2, 216, 6, COLORS.yellow);
+      this.text(this.touch ? "PAUSE BUTTON FOR TITLE" : "ESC FOR TITLE SCREEN", VIEW_W / 2, 229, 5, COLORS.dim);
+    }
+  }
+
+  /** The leaderboard rows, shared by the title's attract mode and the results screen. */
+  private drawBoardRows(g: Game, y0: number, rowH: number): void {
+    if (g.board.length === 0) {
+      const msg = g.boardStatus === "loading" ? "LOADING..." : "NO SCORES YET";
+      this.text(msg, VIEW_W / 2, y0 + 30, 6, COLORS.dim);
+      if (g.boardStatus !== "loading") this.text("BE THE FIRST ON THE TABLE", VIEW_W / 2, y0 + 44, 5, COLORS.dim);
+      return;
+    }
+    this.text("RANK", 40, y0, 4, COLORS.dim, "left");
+    this.text("NAME", 98, y0, 4, COLORS.dim, "left");
+    this.text("SCORE", 182, y0, 4, COLORS.dim, "right");
+    this.text("WAVE", 218, y0, 4, COLORS.dim, "right");
+    g.board.forEach((e, i) => {
+      const y = y0 + 8 + i * rowH;
+      const mine = i === g.highlight;
+      if (mine && Math.floor(g.time * 4) % 2 === 0) this.rect(34, y - 2, 188, rowH - 1, "#2a2a10");
+      const color = mine ? COLORS.yellow : (PODIUM[i] ?? COLORS.text);
+      this.text(ordinal(i + 1), 40, y, 6, color, "left");
+      this.text(e.name, 98, y, 6, color, "left");
+      this.text(String(e.score), 182, y, 6, color, "right");
+      this.text(String(e.wave), 218, y, 6, color, "right");
+    });
+  }
+
+  /** "BUILD: TWIN SHOT 2, RAPID FIRE 1" in small print. */
+  private drawBuild(g: Game, y: number): void {
+    const build = describeBuild(g.perks);
+    if (!build.length) return;
+    wrap(`BUILD: ${build.join(", ")}`, 52)
+      .slice(0, 2)
+      .forEach((line, i) => this.text(line, VIEW_W / 2, y + i * 8, 4, COLORS.dim));
   }
 
   /** The full controls list, used on the title and pause screens. */
@@ -352,6 +562,18 @@ export class Renderer {
     } else {
       this.text(label, x + w / 2, y + 3.5, label.length > 1 ? 4 : 5, COLORS.text);
     }
+  }
+
+  /** Small arrow above (dir -1, pointing up) or below (dir 1, pointing down) a letter. */
+  private triangle(x: number, y: number, dir: number): void {
+    const { ctx } = this;
+    ctx.fillStyle = COLORS.yellow;
+    ctx.beginPath();
+    ctx.moveTo(x - 3, y);
+    ctx.lineTo(x + 3, y);
+    ctx.lineTo(x, y + dir * 3.5);
+    ctx.closePath();
+    ctx.fill();
   }
 
   private dim(alpha: number): void {
