@@ -1,0 +1,22 @@
+{
+  "name": "space-attack",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "devDependencies": {
+    "@fontsource/press-start-2p": "^5.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.2",
+    "vitest": "^5.0.3"
+  }
+}
